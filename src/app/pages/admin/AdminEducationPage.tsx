@@ -1,727 +1,630 @@
-import { useEffect, useMemo, useState } from "react";
-import axios from "axios";
-import {
-  BookOpen,
-  Play,
-  Plus,
-  Pencil,
-  Trash2,
-  Search,
-  X,
-  Save,
-  Video,
-  GraduationCap,
-} from "lucide-react";
-import { toast } from "sonner";
+import { useState, ChangeEvent, useRef, useEffect, useMemo } from "react";
+import { useNavigate } from "react-router-dom";
+import Webcam from "react-webcam";
+
+
+import { Button } from "../../components/Button";
+import { GlassCard } from "../../components/GlassCard";
+import { ProgressIndicator } from "../../components/ProgressIndicator";
+import { PageTransition } from "../../components/PageTransition";
+import { ScannerCore } from "../../components/ScannerCore";
+import { ScannerActions } from "../../components/ScannerActions";
+
+import { motion, AnimatePresence } from "motion/react";
+import { Upload, AlertCircle, X, Crown, Camera, Info } from "lucide-react";
 import { useAuth } from "../../contexts/AuthContext";
+import { http } from "../../api/http";
+import { usePhotoLimit } from "../../../hooks/useFeatureAccess";
+import { toast } from "sonner";
 
-interface Article {
-  id: string;
-  title: string;
-  category: string;
-  readTime: number;
-  rating: number;
-  image: string;
-  summary: string;
-  content: string[];
-}
+const cameraCrystal = new URL("../../../assets/hd_restoration_result_image.png", import.meta.url).href;
 
-interface VideoItem {
-  id: string;
-  title: string;
-  duration: string;
-  thumbnail: string;
-  category: string;
-  url: string;
-}
+export function UploadPage() {
+  const navigate = useNavigate();
+  const { token, isAuthenticated, isInitialized, login, refreshNow } = useAuth();
+  const { maxPhotos } = usePhotoLimit();
 
-const API_BASE_URL = (import.meta.env.VITE_API_URL as string) || "http://localhost:3000";
+  const [uploading, setUploading] = useState(false);
+  const [files, setFiles] = useState<File[]>([]);
+  const [showCamera, setShowCamera] = useState(false);
+  const [isCentered, setIsCentered] = useState(false);
+  const isLimitReached = files.length >= maxPhotos;
 
-const emptyArticleForm = {
-  title: "",
-  category: "",
-  readTime: 5,
-  rating: 5,
-  image: "",
-  summary: "",
-  contentText: "",
-};
+  const webcamRef = useRef<Webcam | null>(null);
 
-const emptyVideoForm = {
-  title: "",
-  duration: "",
-  thumbnail: "",
-  category: "",
-  url: "",
-};
+  // 🔊 SOUND FIX (UNLOCK AFTER USER CLICK)
+  const audioRef = useRef<HTMLAudioElement | null>(null);
 
-export default function AdminEducationPage() {
-  const { token, isInitialized, isAuthenticated, isAdmin } = useAuth();
+  const initSound = () => {
+    if (!audioRef.current) {
+      audioRef.current = new Audio("/beep.mp3");
 
-  const [tab, setTab] = useState<"articles" | "videos">("articles");
-  const [articles, setArticles] = useState<Article[]>([]);
-  const [videos, setVideos] = useState<VideoItem[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [searchQuery, setSearchQuery] = useState("");
-
-  const [showArticleModal, setShowArticleModal] = useState(false);
-  const [showVideoModal, setShowVideoModal] = useState(false);
-
-  const [editingArticleId, setEditingArticleId] = useState<string | null>(null);
-  const [editingVideoId, setEditingVideoId] = useState<string | null>(null);
-
-  const [articleForm, setArticleForm] = useState(emptyArticleForm);
-  const [videoForm, setVideoForm] = useState(emptyVideoForm);
-
-  const authHeaders = useMemo(
-    () => ({
-      Authorization: `Bearer ${token}`,
-      Accept: "application/json",
-      "Content-Type": "application/json",
-    }),
-    [token],
-  );
-
-  const fetchAll = async () => {
-    if (!token || !isAdmin) return;
-
-    try {
-      setLoading(true);
-
-      const [articlesRes, videosRes] = await Promise.all([
-        axios.get(`${API_BASE_URL}/admin/education/articles`, {
-          headers: authHeaders,
-        }),
-        axios.get(`${API_BASE_URL}/admin/education/videos`, {
-          headers: authHeaders,
-        }),
-      ]);
-
-      setArticles(Array.isArray(articlesRes.data) ? articlesRes.data : []);
-      setVideos(Array.isArray(videosRes.data) ? videosRes.data : []);
-    } catch (error) {
-      console.error(error);
-      toast.error("Failed to load education admin data");
-    } finally {
-      setLoading(false);
+      // unlock audio (browser requirement)
+      audioRef.current
+        .play()
+        .then(() => {
+          audioRef.current?.pause();
+          if (audioRef.current) audioRef.current.currentTime = 0;
+        })
+        .catch(() => {});
     }
   };
 
-  useEffect(() => {
-    if (!isInitialized) return;
+  const playSound = () => {
+    if (audioRef.current) {
+      audioRef.current.currentTime = 0;
+      audioRef.current.play().catch(() => {});
+    }
+  };
 
-    if (!isAuthenticated || !token || !isAdmin) {
-      setLoading(false);
+  const previewUrls = useMemo(
+    () => files.map((file) => URL.createObjectURL(file)),
+    [files],
+  );
+
+  useEffect(() => {
+    return () => {
+      previewUrls.forEach((url) => URL.revokeObjectURL(url));
+    };
+  }, [previewUrls]);
+
+  // 📂 Upload
+  const handleFileChange = (e: ChangeEvent<HTMLInputElement>) => {
+    if (!e.target.files) return;
+
+    const incomingFiles = Array.from(e.target.files);
+    const newFiles = incomingFiles.filter((file) => file.type.startsWith("image/"));
+    const remainingSlots = maxPhotos - files.length;
+
+    if (newFiles.length !== incomingFiles.length) {
+      toast.error("Only image files are allowed");
+    }
+
+    if (remainingSlots === 0) {
+      toast.error(`Max ${maxPhotos} images reached`);
       return;
     }
 
-    fetchAll();
-  }, [isInitialized, isAuthenticated, token, isAdmin]);
-
-  const filteredArticles = useMemo(() => {
-    return articles.filter((article) =>
-      [article.title, article.category, article.summary]
-        .join(" ")
-        .toLowerCase()
-        .includes(searchQuery.toLowerCase()),
-    );
-  }, [articles, searchQuery]);
-
-  const filteredVideos = useMemo(() => {
-    return videos.filter((video) =>
-      [video.title, video.category, video.duration]
-        .join(" ")
-        .toLowerCase()
-        .includes(searchQuery.toLowerCase()),
-    );
-  }, [videos, searchQuery]);
-
-  const resetArticleModal = () => {
-    setEditingArticleId(null);
-    setArticleForm(emptyArticleForm);
-    setShowArticleModal(false);
+    setFiles((prev) => [...prev, ...newFiles.slice(0, remainingSlots)]);
   };
 
-  const resetVideoModal = () => {
-    setEditingVideoId(null);
-    setVideoForm(emptyVideoForm);
-    setShowVideoModal(false);
+  // ❌ remove
+  const removeFile = (index: number) => {
+    setFiles((prev) => prev.filter((_, i) => i !== index));
   };
 
-  const openCreateArticle = () => {
-    setEditingArticleId(null);
-    setArticleForm(emptyArticleForm);
-    setShowArticleModal(true);
+  // 📸 capture
+  const capturePhoto = () => {
+    if (files.length >= maxPhotos) {
+      toast.error(`Max ${maxPhotos} images reached`);
+      return;
+    }
+
+    if (!webcamRef.current) return;
+
+    const imageSrc = webcamRef.current.getScreenshot();
+    if (!imageSrc) return;
+
+    const byteString = atob(imageSrc.split(",")[1]);
+    const mimeString = imageSrc.split(",")[0].split(":")[1].split(";")[0];
+
+    const ab = new ArrayBuffer(byteString.length);
+    const ia = new Uint8Array(ab);
+
+    for (let i = 0; i < byteString.length; i++) {
+      ia[i] = byteString.charCodeAt(i);
+    }
+
+    const file = new File([ab], "camera.jpg", { type: mimeString });
+
+    setFiles((prev) => [...prev, file].slice(0, maxPhotos));
+    setShowCamera(false);
   };
 
-  const openEditArticle = (article: Article) => {
-    setEditingArticleId(article.id);
-    setArticleForm({
-      title: article.title,
-      category: article.category,
-      readTime: article.readTime,
-      rating: article.rating,
-      image: article.image,
-      summary: article.summary,
-      contentText: article.content.join("\n\n"),
-    });
-    setShowArticleModal(true);
-  };
+  // 🎯 simple center effect (visual only)
+  useEffect(() => {
+    if (!showCamera) return;
 
-  const openCreateVideo = () => {
-    setEditingVideoId(null);
-    setVideoForm(emptyVideoForm);
-    setShowVideoModal(true);
-  };
+    const interval = setInterval(() => {
+      const centered = Math.random() > 0.5;
 
-  const openEditVideo = (video: VideoItem) => {
-    setEditingVideoId(video.id);
-    setVideoForm({
-      title: video.title,
-      duration: video.duration,
-      thumbnail: video.thumbnail,
-      category: video.category,
-      url: video.url,
-    });
-    setShowVideoModal(true);
-  };
+      setIsCentered(centered);
 
-  const handleSaveArticle = async () => {
-    try {
-      const payload = {
-        title: articleForm.title,
-        category: articleForm.category,
-        readTime: Number(articleForm.readTime),
-        rating: Number(articleForm.rating),
-        image: articleForm.image,
-        summary: articleForm.summary,
-        content: articleForm.contentText
-          .split("\n")
-          .map((p) => p.trim())
-          .filter(Boolean),
-      };
-
-      if (editingArticleId) {
-        await axios.patch(
-          `${API_BASE_URL}/admin/education/articles/${editingArticleId}`,
-          payload,
-          { headers: authHeaders },
-        );
-        toast.success("Article updated successfully");
-      } else {
-        await axios.post(`${API_BASE_URL}/admin/education/articles`, payload, {
-          headers: authHeaders,
-        });
-        toast.success("Article created successfully");
+      if (centered) {
+        playSound();
       }
+    }, 2000);
 
-      resetArticleModal();
-      fetchAll();
-    } catch (error) {
-      console.error(error);
-      toast.error("Failed to save article");
+    return () => clearInterval(interval);
+  }, [showCamera]);
+
+  // 🚀 analyze
+  const handleAnalyze = async () => {
+    if (!files.length) return toast.error("Upload at least one photo");
+
+    if (!isInitialized) return toast.error("Auth initializing...");
+    if (!isAuthenticated) {
+      login("/upload");
+      return;
     }
-  };
 
-  const handleSaveVideo = async () => {
-    try {
-      const payload = {
-        title: videoForm.title,
-        duration: videoForm.duration,
-        thumbnail: videoForm.thumbnail,
-        category: videoForm.category,
-        url: videoForm.url,
-      };
+    setUploading(true);
 
-      if (editingVideoId) {
-        await axios.patch(
-          `${API_BASE_URL}/admin/education/videos/${editingVideoId}`,
-          payload,
-          { headers: authHeaders },
-        );
-        toast.success("Video updated successfully");
-      } else {
-        await axios.post(`${API_BASE_URL}/admin/education/videos`, payload, {
-          headers: authHeaders,
-        });
-        toast.success("Video created successfully");
-      }
-
-      resetVideoModal();
-      fetchAll();
-    } catch (error) {
-      console.error(error);
-      toast.error("Failed to save video");
-    }
-  };
-
-  const handleDeleteArticle = async (id: string) => {
-    if (!window.confirm("Delete this article?")) return;
+    const formData = new FormData();
+    formData.append("image", files[0]);
 
     try {
-      await axios.delete(`${API_BASE_URL}/admin/education/articles/${id}`, {
-        headers: authHeaders,
+      await refreshNow();
+
+      const API = (import.meta.env.VITE_API_URL as string) || "http://localhost:3000";
+      const res = await fetch(`${API}/ai/analyze`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+        body: formData,
       });
-      toast.success("Article deleted successfully");
-      fetchAll();
-    } catch (error) {
-      console.error(error);
-      toast.error("Failed to delete article");
+
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.message || "Error");
+
+      localStorage.setItem("skinAnalysisResult", JSON.stringify(data));
+      navigate("/results");
+    } catch (err: any) {
+      toast.error(err.message);
+    } finally {
+      setUploading(false);
     }
   };
-
-  const handleDeleteVideo = async (id: string) => {
-    if (!window.confirm("Delete this video?")) return;
-
-    try {
-      await axios.delete(`${API_BASE_URL}/admin/education/videos/${id}`, {
-        headers: authHeaders,
-      });
-      toast.success("Video deleted successfully");
-      fetchAll();
-    } catch (error) {
-      console.error(error);
-      toast.error("Failed to delete video");
-    }
-  };
-
-  if (!isInitialized || loading) {
-    return (
-      <div className="space-y-6">
-        <div className="bg-white dark:bg-[#2d1b4e] rounded-3xl p-10 shadow-lg border border-purple-100 dark:border-purple-800/30 text-center">
-          <div className="w-16 h-16 mx-auto rounded-3xl bg-gradient-to-br from-[#8b63d3] to-[#b89de6] flex items-center justify-center mb-4">
-            <GraduationCap className="text-white" size={28} />
-          </div>
-          <h2 className="text-2xl font-black text-gray-900 dark:text-white mb-2">
-            Education Management
-          </h2>
-          <p className="text-gray-500 dark:text-gray-400">Loading content...</p>
-        </div>
-      </div>
-    );
-  }
-
-  if (!isAuthenticated) {
-    return (
-      <div className="bg-white dark:bg-[#2d1b4e] rounded-3xl p-10 shadow-lg border border-purple-100 dark:border-purple-800/30 text-center">
-        <p className="text-gray-600 dark:text-gray-300">You are not authenticated.</p>
-      </div>
-    );
-  }
-
-  if (!isAdmin) {
-    return (
-      <div className="bg-white dark:bg-[#2d1b4e] rounded-3xl p-10 shadow-lg border border-purple-100 dark:border-purple-800/30 text-center">
-        <p className="text-gray-600 dark:text-gray-300">Admin access required.</p>
-      </div>
-    );
-  }
 
   return (
-    <div className="space-y-6">
-      <div className="bg-white dark:bg-[#2d1b4e] rounded-[2rem] p-6 shadow-lg border border-purple-100 dark:border-purple-800/30">
-        <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
-          <div>
-            <div className="inline-flex items-center justify-center w-14 h-14 rounded-[1.5rem] bg-gradient-to-br from-[#8b63d3] to-[#b89de6] mb-4 shadow-xl">
-              <GraduationCap className="text-white" size={28} />
-            </div>
-            <h1 className="text-3xl font-black text-gray-800 dark:text-white tracking-tight">
-              Education Management
-            </h1>
-            <p className="text-gray-500 dark:text-gray-400 mt-2">
-              Manage articles and videos shown in the Education Hub
-            </p>
-          </div>
+    <PageTransition direction="left">
+      <div className="relative isolate min-h-screen overflow-hidden bg-[#f4edf9] dark:bg-[#1a0f2e] flex items-center justify-center p-4 pt-24 sm:p-6 sm:pt-20">
+        {/* AI BACKGROUND LAYERS */}
+        <div className="pointer-events-none absolute inset-0 z-0">
+          <motion.img
+            src={cameraCrystal}
+            alt=""
+            aria-hidden="true"
+            className="absolute right-[6%] top-[14%] w-[280px] sm:w-[340px] opacity-[0.28] blur-[0.4px]"
+            style={{ filter: "drop-shadow(0 20px 42px rgba(165,103,255,0.28))" }}
+            animate={{ y: [0, -22, 0], x: [0, -16, 0], rotate: [0, 1.8, 0] }}
+            transition={{ duration: 10, repeat: Infinity, ease: "easeInOut" }}
+          />
 
-          <div className="flex gap-3 flex-wrap">
-            <button
-              onClick={openCreateArticle}
-              className="inline-flex items-center gap-2 px-5 py-3 rounded-2xl bg-gradient-to-r from-[#8b63d3] to-[#b89de6] text-white font-bold shadow-lg hover:shadow-xl transition-all"
-            >
-              <Plus size={18} />
-              New Article
-            </button>
+          <motion.img
+            src={cameraCrystal}
+            alt=""
+            aria-hidden="true"
+            className="absolute left-[5%] bottom-[8%] w-[190px] sm:w-[240px] opacity-[0.18] scale-x-[-1]"
+            style={{ filter: "drop-shadow(0 14px 36px rgba(165,103,255,0.2))" }}
+            animate={{ y: [0, 16, 0], x: [0, 12, 0], rotate: [0, -1.6, 0] }}
+            transition={{ duration: 12, repeat: Infinity, ease: "easeInOut" }}
+          />
 
-            <button
-              onClick={openCreateVideo}
-              className="inline-flex items-center gap-2 px-5 py-3 rounded-2xl bg-white dark:bg-[#24153f] border border-purple-200 dark:border-purple-700 text-[#8b63d3] font-bold shadow-lg hover:shadow-xl transition-all"
-            >
-              <Plus size={18} />
-              New Video
-            </button>
-          </div>
+          <div
+            className="absolute inset-0"
+            style={{
+              background:
+                "radial-gradient(1200px 620px at 10% 10%, rgba(249,188,218,0.48), transparent 60%), radial-gradient(980px 560px at 90% 15%, rgba(196,145,255,0.42), transparent 58%), radial-gradient(820px 500px at 50% 92%, rgba(255,201,174,0.36), transparent 58%)",
+            }}
+          />
+
+          <motion.div
+            className="absolute -top-28 -left-24 h-[420px] w-[420px] rounded-full bg-[radial-gradient(circle_at_center,rgba(252,197,223,0.62),rgba(252,197,223,0)_70%)] blur-3xl"
+            animate={{ x: [0, 52, 0], y: [0, 30, 0] }}
+            transition={{ duration: 18, repeat: Infinity, ease: "easeInOut" }}
+          />
+          <motion.div
+            className="absolute top-[22%] -right-28 h-[440px] w-[440px] rounded-full bg-[radial-gradient(circle_at_center,rgba(205,171,255,0.52),rgba(205,171,255,0)_70%)] blur-3xl"
+            animate={{ x: [0, -42, 0], y: [0, -26, 0] }}
+            transition={{ duration: 20, repeat: Infinity, ease: "easeInOut" }}
+          />
+          <motion.div
+            className="absolute -bottom-32 left-[24%] h-[420px] w-[420px] rounded-full bg-[radial-gradient(circle_at_center,rgba(255,199,173,0.48),rgba(255,199,173,0)_72%)] blur-3xl"
+            animate={{ x: [0, 36, 0], y: [0, -32, 0] }}
+            transition={{ duration: 22, repeat: Infinity, ease: "easeInOut" }}
+          />
+
+          <motion.div
+            className="absolute -left-[35%] top-[-20%] h-[180%] w-[55%] rotate-[16deg] opacity-[0.3]"
+            style={{
+              background:
+                "linear-gradient(180deg, rgba(255,255,255,0), rgba(247,189,220,0.94), rgba(196,145,255,0.7), rgba(255,255,255,0))",
+              filter: "blur(42px)",
+            }}
+            animate={{ x: ["0%", "280%"] }}
+            transition={{ duration: 10, repeat: Infinity, ease: "linear" }}
+          />
+
+          {/* Floating AI particles */}
+          <motion.div
+            className="absolute left-[5%] top-[18%] h-36 w-36 rounded-full bg-[radial-gradient(circle_at_30%_30%,rgba(255,218,236,0.98),rgba(255,218,236,0))] blur-2xl"
+            animate={{ x: [0, 78, 0], y: [0, -52, 0], scale: [1, 1.08, 1] }}
+            transition={{ duration: 11, repeat: Infinity, ease: "easeInOut" }}
+          />
+          <motion.div
+            className="absolute right-[7%] top-[30%] h-32 w-32 rounded-full bg-[radial-gradient(circle_at_40%_35%,rgba(210,183,255,0.94),rgba(210,183,255,0))] blur-2xl"
+            animate={{ x: [0, -64, 0], y: [0, 42, 0], scale: [1, 1.1, 1] }}
+            transition={{ duration: 12, repeat: Infinity, ease: "easeInOut" }}
+          />
+          <motion.div
+            className="absolute left-[16%] bottom-[11%] h-28 w-28 rounded-full bg-[radial-gradient(circle_at_center,rgba(255,218,193,0.92),rgba(255,218,193,0))] blur-xl"
+            animate={{ x: [0, 54, 0], y: [0, -34, 0], scale: [1, 1.08, 1] }}
+            transition={{ duration: 10, repeat: Infinity, ease: "easeInOut" }}
+          />
+          <motion.div
+            className="absolute right-[14%] bottom-[16%] h-40 w-40 rounded-full bg-[radial-gradient(circle_at_center,rgba(233,198,255,0.84),rgba(233,198,255,0))] blur-2xl"
+            animate={{ x: [0, -58, 0], y: [0, -40, 0], scale: [1, 1.08, 1] }}
+            transition={{ duration: 14, repeat: Infinity, ease: "easeInOut" }}
+          />
+          {["left-[10%] top-[12%]", "left-[84%] top-[16%]", "left-[78%] top-[72%]", "left-[20%] top-[70%]", "left-[64%] top-[26%]", "left-[35%] top-[82%]"]
+            .map((position, index) => (
+              <motion.span
+                key={position}
+                className={`absolute ${position} h-2.5 w-2.5 rounded-full bg-white/80 shadow-[0_0_18px_rgba(245,183,220,0.72)]`}
+                animate={{ y: [0, -24, 0], x: [0, 8, 0], opacity: [0.4, 1, 0.4] }}
+                transition={{ duration: 4 + index * 0.5, repeat: Infinity, ease: "easeInOut" }}
+              />
+            ))}
+
+          <div
+            className="absolute inset-0 opacity-[0.1] dark:opacity-[0.14]"
+            style={{
+              backgroundImage:
+                "linear-gradient(rgba(139,99,211,0.22) 1px, transparent 1px), linear-gradient(90deg, rgba(139,99,211,0.18) 1px, transparent 1px)",
+              backgroundSize: "52px 52px",
+            }}
+          />
+
+          <div
+            className="absolute inset-0 opacity-[0.12] dark:opacity-[0.16]"
+            style={{
+              backgroundImage:
+                "radial-gradient(circle at center, rgba(139,99,211,0.35) 1px, transparent 1.2px)",
+              backgroundSize: "30px 30px",
+            }}
+          />
+
+          <motion.div
+            className="absolute inset-0 opacity-[0.14] dark:opacity-[0.2]"
+            style={{
+              backgroundImage:
+                "repeating-linear-gradient(180deg, rgba(139,99,211,0.3) 0px, rgba(139,99,211,0.3) 1px, transparent 1px, transparent 10px)",
+            }}
+            animate={{ y: [0, 34, 0] }}
+            transition={{ duration: 9, repeat: Infinity, ease: "linear" }}
+          />
         </div>
-      </div>
 
-      <div className="bg-white dark:bg-[#2d1b4e] rounded-2xl p-4 shadow-lg border border-purple-100 dark:border-purple-800/30">
-        <div className="flex flex-col md:flex-row gap-4 md:items-center md:justify-between">
-          <div className="flex bg-purple-50 dark:bg-purple-900/20 rounded-2xl p-1 w-fit">
-            <button
-              onClick={() => setTab("articles")}
-              className={`px-5 py-2 rounded-xl font-bold transition-all ${
-                tab === "articles"
-                  ? "bg-[#8b63d3] text-white shadow"
-                  : "text-gray-600 dark:text-gray-300"
-              }`}
+        <div className="relative z-10 w-full max-w-6xl">
+          {/* Progress bar */}
+          <motion.div
+            initial={{ opacity: 0, y: -20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.6 }}
+            className="mb-12"
+          >
+            <ProgressIndicator currentStep={3} totalSteps={4} />
+          </motion.div>
+
+          {/* Main scanner interface */}
+          <div className="flex flex-col items-center gap-12">
+            {/* Header */}
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.6, delay: 0.1 }}
+              className="text-center space-y-3"
             >
-              <span className="inline-flex items-center gap-2">
-                <BookOpen size={16} />
-                Articles
-              </span>
-            </button>
+              <h2 className="text-3xl md:text-4xl font-semibold text-gray-800 dark:text-white">
+                AI Skin Scanner
+              </h2>
+              <p className="text-gray-500 text-sm md:text-base max-w-xl mx-auto">
+                Upload up to {maxPhotos} clear photos for advanced AI analysis
+              </p>
 
-            <button
-              onClick={() => setTab("videos")}
-              className={`px-5 py-2 rounded-xl font-bold transition-all ${
-                tab === "videos"
-                  ? "bg-[#8b63d3] text-white shadow"
-                  : "text-gray-600 dark:text-gray-300"
-              }`}
-            >
-              <span className="inline-flex items-center gap-2">
-                <Play size={16} />
-                Videos
-              </span>
-            </button>
-          </div>
-
-          <div className="relative w-full md:w-[360px]">
-            <Search
-              className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400"
-              size={18}
-            />
-            <input
-              type="text"
-              placeholder={`Search ${tab}...`}
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full pl-11 pr-4 py-3 rounded-2xl bg-purple-50 dark:bg-purple-900/20 border border-purple-200 dark:border-purple-700 focus:outline-none focus:ring-2 focus:ring-[#8b63d3] text-gray-700 dark:text-white"
-            />
-          </div>
-        </div>
-      </div>
-
-      {tab === "articles" ? (
-        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
-          {filteredArticles.map((article) => (
-            <div
-              key={article.id}
-              className="bg-white dark:bg-[#2d1b4e] rounded-[2rem] overflow-hidden shadow-xl border border-purple-100 dark:border-purple-800/30"
-            >
-              <div className="h-52 overflow-hidden">
-                <img
-                  src={article.image || "https://via.placeholder.com/800x500?text=Article"}
-                  alt={article.title}
-                  className="w-full h-full object-cover"
-                />
-              </div>
-
-              <div className="p-6">
-                <div className="flex items-center justify-between gap-3 mb-4">
-                  <span className="text-[10px] font-black uppercase text-[#8b63d3] bg-purple-50 dark:bg-purple-900/30 px-3 py-1 rounded-full tracking-widest">
-                    {article.category}
-                  </span>
-                  <span className="text-xs font-bold text-amber-500">
-                    ★ {article.rating}
-                  </span>
-                </div>
-
-                <h3 className="text-xl font-bold text-gray-900 dark:text-white leading-tight">
-                  {article.title}
-                </h3>
-
-                <p className="text-sm text-gray-500 dark:text-gray-400 mt-3 line-clamp-3 leading-relaxed">
-                  {article.summary}
-                </p>
-
-                <div className="mt-6 flex items-center justify-between text-xs text-gray-400 font-bold uppercase tracking-widest">
-                  <span>{article.readTime} min read</span>
-                  <span>{article.content.length} paragraphs</span>
-                </div>
-
-                <div className="mt-6 flex gap-3">
-                  <button
-                    onClick={() => openEditArticle(article)}
-                    className="flex-1 inline-flex items-center justify-center gap-2 px-4 py-3 rounded-2xl bg-purple-50 dark:bg-purple-900/20 text-[#8b63d3] font-bold hover:opacity-90 transition-all"
-                  >
-                    <Pencil size={16} />
-                    Edit
-                  </button>
-
-                  <button
-                    onClick={() => handleDeleteArticle(article.id)}
-                    className="flex-1 inline-flex items-center justify-center gap-2 px-4 py-3 rounded-2xl bg-red-50 dark:bg-red-900/20 text-red-600 font-bold hover:opacity-90 transition-all"
-                  >
-                    <Trash2 size={16} />
-                    Delete
-                  </button>
-                </div>
-              </div>
-            </div>
-          ))}
-
-          {filteredArticles.length === 0 && (
-            <div className="col-span-full bg-white dark:bg-[#2d1b4e] rounded-2xl p-10 shadow-lg border border-purple-100 dark:border-purple-800/30 text-center text-gray-500 dark:text-gray-400">
-              No articles found
-            </div>
-          )}
-        </div>
-      ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
-          {filteredVideos.map((video) => (
-            <div
-              key={video.id}
-              className="bg-white dark:bg-[#2d1b4e] rounded-[2rem] overflow-hidden shadow-xl border border-purple-100 dark:border-purple-800/30"
-            >
-              <div className="h-52 overflow-hidden relative">
-                <img
-                  src={video.thumbnail || "https://via.placeholder.com/800x500?text=Video"}
-                  alt={video.title}
-                  className="w-full h-full object-cover"
-                />
-                <span className="absolute bottom-3 right-3 bg-black/70 text-white text-[10px] font-black px-3 py-1 rounded-lg">
-                  {video.duration}
+              <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-white/80 border border-[#ead9fb] shadow-[0_10px_24px_rgba(139,99,211,0.08)]">
+                <Crown className="w-4 h-4 text-[#8b63d3]" />
+                <span className="text-sm font-semibold">
+                  {maxPhotos} Image{maxPhotos > 1 ? 's' : ''} Limit
                 </span>
               </div>
+            </motion.div>
 
-              <div className="p-6">
-                <div className="flex items-center justify-between gap-3 mb-4">
-                  <span className="text-[10px] font-black uppercase text-[#8b63d3] bg-purple-50 dark:bg-purple-900/30 px-3 py-1 rounded-full tracking-widest">
-                    {video.category}
+            {/* Scanner Core Section */}
+            <motion.div
+              initial={{ opacity: 0, scale: 0.9 }}
+              animate={{ opacity: 1, scale: 1 }}
+              transition={{ duration: 0.6, delay: 0.2 }}
+              className="relative w-full flex items-center justify-center"
+              style={{ height: 400 }}
+            >
+              {/* Counter above scanner */}
+              <motion.div
+                className="absolute -top-16 left-1/2 -translate-x-1/2 px-6 py-3 rounded-full border border-[#eddffb] bg-white/70 dark:bg-purple-900/20 backdrop-blur-xl shadow-lg"
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: 0.3 }}
+              >
+                <div className="flex items-center gap-3">
+                  <span className="text-sm text-gray-700 dark:text-gray-300 font-medium">
+                    <strong className="text-[#8b63d3]">{files.length}</strong> / {maxPhotos} photos
                   </span>
-                  <Video size={18} className="text-[#8b63d3]" />
+                  <div className="flex gap-1">
+                    {Array.from({ length: maxPhotos }).map((_, index) => (
+                      <div
+                        key={index}
+                        className={`w-2 h-2 rounded-full transition-all ${
+                          index < files.length
+                            ? "bg-[#8b63d3] scale-110"
+                            : "bg-gray-300 dark:bg-gray-600"
+                        }`}
+                      />
+                    ))}
+                  </div>
                 </div>
+              </motion.div>
 
-                <h3 className="text-xl font-bold text-gray-900 dark:text-white leading-tight">
-                  {video.title}
-                </h3>
+              {/* Scanner Core */}
+              <ScannerCore isScanning={uploading} />
 
-                <p className="text-sm text-gray-500 dark:text-gray-400 mt-3 line-clamp-2 break-all">
-                  {video.url}
+              {/* Action Buttons */}
+              <ScannerActions
+                onCamera={() => {
+                  if (isLimitReached) {
+                    toast.error(`Max ${maxPhotos} images reached`);
+                    return;
+                  }
+                  initSound();
+                  setShowCamera(true);
+                }}
+                onUpload={() => {
+                  if (!isLimitReached) {
+                    // Trigger hidden file input
+                    const fileInput = document.getElementById("file-input") as HTMLInputElement;
+                    fileInput?.click();
+                  }
+                }}
+                disabled={isLimitReached}
+              />
+            </motion.div>
+
+            {/* Photo Preview Grid */}
+            {files.length > 0 && (
+              <motion.div
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ duration: 0.5 }}
+                className="w-full"
+              >
+                <p className="text-center text-sm font-semibold text-gray-700 dark:text-gray-300 mb-4">
+                  Selected Photos
                 </p>
+                <div className="flex justify-center">
+                  <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4 max-w-2xl">
+                    <AnimatePresence>
+                      {files.map((file, index) => (
+                        <motion.div
+                          key={`${file.name}-${index}`}
+                          initial={{ opacity: 0, scale: 0.7 }}
+                          animate={{ opacity: 1, scale: 1 }}
+                          exit={{ opacity: 0, scale: 0.7 }}
+                          className="relative group"
+                        >
+                          <motion.div
+                            className="aspect-square rounded-2xl overflow-hidden border border-[#eddffb] bg-white/40 backdrop-blur-sm"
+                            whileHover={{ scale: 1.08 }}
+                          >
+                            <img
+                              src={previewUrls[index]}
+                              className="w-full h-full object-cover"
+                            />
+                            <div className="absolute inset-0 bg-gradient-to-br from-white/20 to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
+                          </motion.div>
 
-                <div className="mt-6 flex gap-3">
-                  <button
-                    onClick={() => openEditVideo(video)}
-                    className="flex-1 inline-flex items-center justify-center gap-2 px-4 py-3 rounded-2xl bg-purple-50 dark:bg-purple-900/20 text-[#8b63d3] font-bold hover:opacity-90 transition-all"
-                  >
-                    <Pencil size={16} />
-                    Edit
-                  </button>
+                          <button
+                            onClick={() => removeFile(index)}
+                            className="absolute -top-2 -right-2 w-7 h-7 bg-red-500 text-white rounded-full flex items-center justify-center opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity shadow-lg hover:bg-red-600"
+                            aria-label="Remove photo"
+                          >
+                            <X size={14} />
+                          </button>
+                        </motion.div>
+                      ))}
+                    </AnimatePresence>
+                  </div>
+                </div>
+              </motion.div>
+            )}
 
-                  <button
-                    onClick={() => handleDeleteVideo(video.id)}
-                    className="flex-1 inline-flex items-center justify-center gap-2 px-4 py-3 rounded-2xl bg-red-50 dark:bg-red-900/20 text-red-600 font-bold hover:opacity-90 transition-all"
-                  >
-                    <Trash2 size={16} />
-                    Delete
-                  </button>
+            {/* Analyze Button */}
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.6, delay: 0.3 }}
+              className="w-full max-w-md"
+            >
+              <motion.div
+                whileHover={!uploading ? { scale: 1.02 } : {}}
+                whileTap={!uploading ? { scale: 0.98 } : {}}
+              >
+                <Button
+                  glow
+                  className="w-full h-14 text-lg font-semibold bg-gradient-to-r from-[#8b63d3] via-[#c95785] to-[#e8a1c0] hover:from-[#7a5325] hover:via-[#b83f6f] hover:to-[#d68fb0]"
+                  onClick={handleAnalyze}
+                  disabled={uploading || files.length === 0}
+                >
+                  {uploading ? (
+                    <motion.div
+                      animate={{ rotate: 360 }}
+                      transition={{ duration: 1, repeat: Infinity, ease: "linear" }}
+                      className="inline-block mr-2"
+                    >
+                      ◆
+                    </motion.div>
+                  ) : (
+                    "↗"
+                  )}
+                  {uploading ? "Analyzing Your Skin..." : "Analyze My Skin"}
+                </Button>
+              </motion.div>
+            </motion.div>
+
+            {/* Tips Card */}
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.6, delay: 0.4 }}
+              className="w-full"
+            >
+              <GlassCard className="bg-white/75 border border-[#eddffb] dark:bg-purple-900/20 p-6 backdrop-blur-xl">
+                <div className="flex items-start gap-3">
+                  <Info className="w-5 h-5 text-[#8b63d3] mt-1 flex-shrink-0" />
+                  <div className="text-sm text-gray-700 dark:text-gray-300">
+                    <p className="mb-3 font-semibold">For best results, capture from multiple angles:</p>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                      <ul className="list-disc list-inside space-y-1 text-gray-600 dark:text-gray-400">
+                        <li>Front view (face forward)</li>
+                        <li>Left side profile</li>
+                        <li>Right side profile</li>
+                      </ul>
+                      <ul className="list-disc list-inside space-y-1 text-gray-600 dark:text-gray-400">
+                        <li>Use natural lighting</li>
+                        <li>Remove makeup if possible</li>
+                        <li>Ensure photos are clear and focused</li>
+                      </ul>
+                    </div>
+                  </div>
+                </div>
+              </GlassCard>
+            </motion.div>
+          </div>
+
+          {/* Hidden file input */}
+          <input
+            id="file-input"
+            type="file"
+            hidden
+            multiple
+            accept="image/*"
+            onChange={handleFileChange}
+          />
+        </div>
+
+        {/* CAMERA MODAL - Enhanced UI */}
+        {showCamera && (
+          <motion.div
+            className="fixed inset-0 bg-black/80 backdrop-blur-xl flex items-center justify-center z-50 p-4"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.3 }}
+          >
+            <motion.div
+              className="relative w-[min(95vw,800px)]"
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              transition={{ duration: 0.3 }}
+            >
+              <Webcam
+                ref={webcamRef}
+                screenshotFormat="image/jpeg"
+                videoConstraints={{ facingMode: "user" }}
+                className="w-full rounded-3xl shadow-[0_20px_60px_rgba(0,0,0,0.6)]"
+              />
+
+              {/* 🎯 ENHANCED SCANNER OVAL GUIDE */}
+              <div className="absolute inset-0 flex items-center justify-center pointer-events-none rounded-3xl overflow-hidden">
+                <div className="relative h-80 w-64 sm:h-96 sm:w-72">
+                  {/* Main oval frame */}
+                  <motion.div
+                    className={`absolute inset-0 rounded-full border-2 transition-all duration-300 ${
+                      isCentered
+                        ? "border-emerald-300/90"
+                        : "border-white/50"
+                    }`}
+                    style={{
+                      boxShadow: isCentered
+                        ? "0 0 50px rgba(52,211,153,0.6), inset 0 0 40px rgba(52,211,153,0.3)"
+                        : "0 0 40px rgba(206,154,255,0.4), inset 0 0 30px rgba(245,183,220,0.25)",
+                    }}
+                    animate={{ scale: isCentered ? [1, 1.02, 1] : [1, 1.01, 1] }}
+                    transition={{ duration: 1.6, repeat: Infinity, ease: "easeInOut" }}
+                  />
+
+                  {/* Inner frame */}
+                  <motion.div
+                    className="absolute inset-1 rounded-full border border-[#eebee2]/80"
+                    style={{
+                      boxShadow: "0 0 30px rgba(195,140,255,0.35)",
+                    }}
+                    animate={{ opacity: [0.5, 0.9, 0.5] }}
+                    transition={{ duration: 2.8, repeat: Infinity, ease: "easeInOut" }}
+                  />
+
+                  {/* Scanning line */}
+                  <motion.div
+                    className="absolute left-1/2 top-2 h-1 w-40 -translate-x-1/2 rounded-full bg-gradient-to-r from-transparent via-white/80 to-transparent"
+                    animate={{ y: [0, 300, 0], opacity: [0.2, 0.9, 0.2] }}
+                    transition={{ duration: 3, repeat: Infinity, ease: "easeInOut" }}
+                  />
+
+                  {/* Corner markers */}
+                  {[
+                    "-left-2 top-8",
+                    "-left-2 bottom-8",
+                    "-right-2 top-8",
+                    "-right-2 bottom-8",
+                  ].map((position) => (
+                    <motion.span
+                      key={position}
+                      className={`absolute ${position} h-2 w-2 rounded-full bg-white/95 shadow-[0_0_16px_rgba(255,255,255,0.9)]`}
+                      animate={{ scale: [1, 1.3, 1], opacity: [0.6, 1, 0.6] }}
+                      transition={{ duration: 2, repeat: Infinity, ease: "easeInOut" }}
+                    />
+                  ))}
                 </div>
               </div>
-            </div>
-          ))}
 
-          {filteredVideos.length === 0 && (
-            <div className="col-span-full bg-white dark:bg-[#2d1b4e] rounded-2xl p-10 shadow-lg border border-purple-100 dark:border-purple-800/30 text-center text-gray-500 dark:text-gray-400">
-              No videos found
-            </div>
-          )}
-        </div>
-      )}
-
-      {showArticleModal && (
-        <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="w-full max-w-3xl bg-white dark:bg-[#2d1b4e] rounded-[2rem] shadow-2xl border border-purple-100 dark:border-purple-800/30 overflow-hidden">
-            <div className="flex items-center justify-between px-6 py-5 border-b border-purple-100 dark:border-purple-800/30">
-              <h2 className="text-2xl font-black text-gray-800 dark:text-white">
-                {editingArticleId ? "Edit Article" : "Create Article"}
-              </h2>
-              <button
-                onClick={resetArticleModal}
-                className="p-2 rounded-xl hover:bg-purple-50 dark:hover:bg-purple-900/20"
+              {/* Close button */}
+              <motion.button
+                onClick={() => setShowCamera(false)}
+                className="absolute top-4 right-4 w-11 h-11 rounded-full bg-black/50 hover:bg-black/70 text-white border border-white/30 flex items-center justify-center transition-all backdrop-blur-md"
+                whileHover={{ scale: 1.1 }}
+                whileTap={{ scale: 0.95 }}
+                aria-label="Close camera"
               >
-                <X size={20} className="text-gray-500" />
-              </button>
-            </div>
+                <X size={20} />
+              </motion.button>
 
-            <div className="p-6 grid grid-cols-1 md:grid-cols-2 gap-4 max-h-[75vh] overflow-y-auto">
-              <input
-                placeholder="Title"
-                value={articleForm.title}
-                onChange={(e) =>
-                  setArticleForm((prev) => ({ ...prev, title: e.target.value }))
-                }
-                className="md:col-span-2 px-4 py-3 rounded-2xl bg-purple-50 dark:bg-purple-900/20 border border-purple-200 dark:border-purple-700 text-gray-800 dark:text-white"
-              />
-
-              <input
-                placeholder="Category"
-                value={articleForm.category}
-                onChange={(e) =>
-                  setArticleForm((prev) => ({ ...prev, category: e.target.value }))
-                }
-                className="px-4 py-3 rounded-2xl bg-purple-50 dark:bg-purple-900/20 border border-purple-200 dark:border-purple-700 text-gray-800 dark:text-white"
-              />
-
-              <input
-                type="number"
-                placeholder="Read Time"
-                value={articleForm.readTime}
-                onChange={(e) =>
-                  setArticleForm((prev) => ({
-                    ...prev,
-                    readTime: Number(e.target.value),
-                  }))
-                }
-                className="px-4 py-3 rounded-2xl bg-purple-50 dark:bg-purple-900/20 border border-purple-200 dark:border-purple-700 text-gray-800 dark:text-white"
-              />
-
-              <input
-                type="number"
-                step="0.1"
-                placeholder="Rating"
-                value={articleForm.rating}
-                onChange={(e) =>
-                  setArticleForm((prev) => ({
-                    ...prev,
-                    rating: Number(e.target.value),
-                  }))
-                }
-                className="px-4 py-3 rounded-2xl bg-purple-50 dark:bg-purple-900/20 border border-purple-200 dark:border-purple-700 text-gray-800 dark:text-white"
-              />
-
-              <input
-                placeholder="Image URL"
-                value={articleForm.image}
-                onChange={(e) =>
-                  setArticleForm((prev) => ({ ...prev, image: e.target.value }))
-                }
-                className="md:col-span-2 px-4 py-3 rounded-2xl bg-purple-50 dark:bg-purple-900/20 border border-purple-200 dark:border-purple-700 text-gray-800 dark:text-white"
-              />
-
-              <textarea
-                placeholder="Summary"
-                value={articleForm.summary}
-                onChange={(e) =>
-                  setArticleForm((prev) => ({ ...prev, summary: e.target.value }))
-                }
-                rows={4}
-                className="md:col-span-2 px-4 py-3 rounded-2xl bg-purple-50 dark:bg-purple-900/20 border border-purple-200 dark:border-purple-700 text-gray-800 dark:text-white"
-              />
-
-              <textarea
-                placeholder="Content paragraphs (one paragraph per line)"
-                value={articleForm.contentText}
-                onChange={(e) =>
-                  setArticleForm((prev) => ({
-                    ...prev,
-                    contentText: e.target.value,
-                  }))
-                }
-                rows={10}
-                className="md:col-span-2 px-4 py-3 rounded-2xl bg-purple-50 dark:bg-purple-900/20 border border-purple-200 dark:border-purple-700 text-gray-800 dark:text-white"
-              />
-            </div>
-
-            <div className="px-6 py-5 border-t border-purple-100 dark:border-purple-800/30 flex justify-end gap-3">
-              <button
-                onClick={resetArticleModal}
-                className="px-5 py-3 rounded-2xl bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-200 font-bold"
+              {/* Action buttons */}
+              <motion.div
+                className="flex flex-col sm:flex-row gap-4 mt-6 justify-center"
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: 0.2 }}
               >
-                Cancel
-              </button>
-              <button
-                onClick={handleSaveArticle}
-                className="inline-flex items-center gap-2 px-5 py-3 rounded-2xl bg-gradient-to-r from-[#8b63d3] to-[#b89de6] text-white font-bold"
-              >
-                <Save size={18} />
-                Save Article
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+                <Button
+                  onClick={capturePhoto}
+                  className="sm:w-auto px-8 h-12 bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-600 hover:to-teal-600"
+                  glow
+                >
+                  📷 Capture Photo
+                </Button>
+                <Button
+                  onClick={() => setShowCamera(false)}
+                  variant="secondary"
+                  className="sm:w-auto px-8 h-12"
+                >
+                  Cancel
+                </Button>
+              </motion.div>
+            </motion.div>
+          </motion.div>
+        )}
 
-      {showVideoModal && (
-        <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="w-full max-w-2xl bg-white dark:bg-[#2d1b4e] rounded-[2rem] shadow-2xl border border-purple-100 dark:border-purple-800/30 overflow-hidden">
-            <div className="flex items-center justify-between px-6 py-5 border-b border-purple-100 dark:border-purple-800/30">
-              <h2 className="text-2xl font-black text-gray-800 dark:text-white">
-                {editingVideoId ? "Edit Video" : "Create Video"}
-              </h2>
-              <button
-                onClick={resetVideoModal}
-                className="p-2 rounded-xl hover:bg-purple-50 dark:hover:bg-purple-900/20"
-              >
-                <X size={20} className="text-gray-500" />
-              </button>
-            </div>
-
-            <div className="p-6 grid grid-cols-1 gap-4">
-              <input
-                placeholder="Title"
-                value={videoForm.title}
-                onChange={(e) =>
-                  setVideoForm((prev) => ({ ...prev, title: e.target.value }))
-                }
-                className="px-4 py-3 rounded-2xl bg-purple-50 dark:bg-purple-900/20 border border-purple-200 dark:border-purple-700 text-gray-800 dark:text-white"
-              />
-
-              <input
-                placeholder="Duration (e.g. 08:24)"
-                value={videoForm.duration}
-                onChange={(e) =>
-                  setVideoForm((prev) => ({ ...prev, duration: e.target.value }))
-                }
-                className="px-4 py-3 rounded-2xl bg-purple-50 dark:bg-purple-900/20 border border-purple-200 dark:border-purple-700 text-gray-800 dark:text-white"
-              />
-
-              <input
-                placeholder="Category"
-                value={videoForm.category}
-                onChange={(e) =>
-                  setVideoForm((prev) => ({ ...prev, category: e.target.value }))
-                }
-                className="px-4 py-3 rounded-2xl bg-purple-50 dark:bg-purple-900/20 border border-purple-200 dark:border-purple-700 text-gray-800 dark:text-white"
-              />
-
-              <input
-                placeholder="Thumbnail URL"
-                value={videoForm.thumbnail}
-                onChange={(e) =>
-                  setVideoForm((prev) => ({ ...prev, thumbnail: e.target.value }))
-                }
-                className="px-4 py-3 rounded-2xl bg-purple-50 dark:bg-purple-900/20 border border-purple-200 dark:border-purple-700 text-gray-800 dark:text-white"
-              />
-
-              <input
-                placeholder="Video URL"
-                value={videoForm.url}
-                onChange={(e) =>
-                  setVideoForm((prev) => ({ ...prev, url: e.target.value }))
-                }
-                className="px-4 py-3 rounded-2xl bg-purple-50 dark:bg-purple-900/20 border border-purple-200 dark:border-purple-700 text-gray-800 dark:text-white"
-              />
-            </div>
-
-            <div className="px-6 py-5 border-t border-purple-100 dark:border-purple-800/30 flex justify-end gap-3">
-              <button
-                onClick={resetVideoModal}
-                className="px-5 py-3 rounded-2xl bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-200 font-bold"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleSaveVideo}
-                className="inline-flex items-center gap-2 px-5 py-3 rounded-2xl bg-gradient-to-r from-[#8b63d3] to-[#b89de6] text-white font-bold"
-              >
-                <Save size={18} />
-                Save Video
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-    </div>
+      </div>
+    </PageTransition>
   );
 }
+

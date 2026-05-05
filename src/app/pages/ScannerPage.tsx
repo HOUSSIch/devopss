@@ -1,907 +1,630 @@
-import { useRef, useState } from "react";
+import { useState, ChangeEvent, useRef, useEffect, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
-import {
-  Scan,
-  Camera,
-  AlertTriangle,
-  CheckCircle,
-  Info,
-  X,
-  Sparkles,
-  Layers,
-  Clock,
-  Image as ImageIcon,
-  Search,
-} from "lucide-react";
-import { useAuth } from "../contexts/AuthContext";
-import { useFeatureAccess } from "../../hooks/useFeatureAccess";
-import { PremiumFeatureLock } from "../components/PremiumFeatureLock";
-import { motion, AnimatePresence } from "motion/react";
+import Webcam from "react-webcam";
+
+
+import { Button } from "../components/Button";
 import { GlassCard } from "../components/GlassCard";
+import { ProgressIndicator } from "../components/ProgressIndicator";
+import { PageTransition } from "../components/PageTransition";
+import { ScannerCore } from "../components/ScannerCore";
+import { ScannerActions } from "../components/ScannerActions";
 
-interface ScannedProduct {
-  barcode: string;
-  name: string;
-  brand: string;
-  image: string;
-  compatibility: "excellent" | "good" | "caution" | "avoid";
-  compatibilityScore: number;
-  ingredients: {
-    name: string;
-    status: "beneficial" | "neutral" | "problematic";
-    description: string;
-  }[];
-  layeringOrder: number;
-  conflictsWith: string[];
-  recommendations: string[];
-}
+import { motion, AnimatePresence } from "motion/react";
+import { Upload, AlertCircle, X, Crown, Camera, Info } from "lucide-react";
+import { useAuth } from "../contexts/AuthContext";
+import { http } from "../api/http";
+import { usePhotoLimit } from "../../hooks/useFeatureAccess";
+import { toast } from "sonner";
 
-export default function ScannerPage() {
+const cameraCrystal = new URL("../../assets/hd_restoration_result_image.png", import.meta.url).href;
+
+export function UploadPage() {
   const navigate = useNavigate();
-  const { token, refreshNow, isAuthenticated, login } = useAuth();
-  const { hasAccess, tierName, requiredTierName } = useFeatureAccess("scanner");
+  const { token, isAuthenticated, isInitialized, login, refreshNow } = useAuth();
+  const { maxPhotos } = usePhotoLimit();
 
-  // Check if user has access to this feature
-  if (isAuthenticated && !hasAccess) {
-    return (
-      <PremiumFeatureLock
-        featureName="Ingredient Scanner"
-        description="Scan any skincare product to instantly check compatibility with your skin type and routine."
-        currentPlan={tierName}
-        requiredPlan={requiredTierName}
-      />
-    );
-  }
+  const [uploading, setUploading] = useState(false);
+  const [files, setFiles] = useState<File[]>([]);
+  const [showCamera, setShowCamera] = useState(false);
+  const [isCentered, setIsCentered] = useState(false);
+  const isLimitReached = files.length >= maxPhotos;
 
-  const [scanning, setScanning] = useState(false);
-  const [scannedProduct, setScannedProduct] = useState<ScannedProduct | null>(null);
-  const [searchQuery, setSearchQuery] = useState("");
-  const [errorMessage, setErrorMessage] = useState("");
+  const webcamRef = useRef<Webcam | null>(null);
 
-  const cameraInputRef = useRef<HTMLInputElement | null>(null);
-  const galleryInputRef = useRef<HTMLInputElement | null>(null);
+  // 🔊 SOUND FIX (UNLOCK AFTER USER CLICK)
+  const audioRef = useRef<HTMLAudioElement | null>(null);
 
-  const analyzeProduct = async (query: string) => {
-    if (!query.trim()) return;
+  const initSound = () => {
+    if (!audioRef.current) {
+      audioRef.current = new Audio("/beep.mp3");
 
-    try {
-      setScanning(true);
-      setErrorMessage("");
-
-      await refreshNow();
-
-      const API = (import.meta.env.VITE_API_URL as string) || "http://localhost:3000";
-      const response = await fetch(`${API}/scanner/analyze-product`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({ query }),
-      });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(
-          typeof data?.message === "string"
-            ? data.message
-            : data?.error || "Failed to analyze product",
-        );
-      }
-
-      setScannedProduct(data);
-    } catch (error: any) {
-      console.error("Scanner text error:", error);
-      setErrorMessage(error?.message || "Failed to analyze product");
-    } finally {
-      setScanning(false);
+      // unlock audio (browser requirement)
+      audioRef.current
+        .play()
+        .then(() => {
+          audioRef.current?.pause();
+          if (audioRef.current) audioRef.current.currentTime = 0;
+        })
+        .catch(() => {});
     }
   };
 
-  const analyzeProductImage = async (file: File) => {
-    try {
-      setScanning(true);
-      setErrorMessage("");
+  const playSound = () => {
+    if (audioRef.current) {
+      audioRef.current.currentTime = 0;
+      audioRef.current.play().catch(() => {});
+    }
+  };
 
+  const previewUrls = useMemo(
+    () => files.map((file) => URL.createObjectURL(file)),
+    [files],
+  );
+
+  useEffect(() => {
+    return () => {
+      previewUrls.forEach((url) => URL.revokeObjectURL(url));
+    };
+  }, [previewUrls]);
+
+  // 📂 Upload
+  const handleFileChange = (e: ChangeEvent<HTMLInputElement>) => {
+    if (!e.target.files) return;
+
+    const incomingFiles = Array.from(e.target.files);
+    const newFiles = incomingFiles.filter((file) => file.type.startsWith("image/"));
+    const remainingSlots = maxPhotos - files.length;
+
+    if (newFiles.length !== incomingFiles.length) {
+      toast.error("Only image files are allowed");
+    }
+
+    if (remainingSlots === 0) {
+      toast.error(`Max ${maxPhotos} images reached`);
+      return;
+    }
+
+    setFiles((prev) => [...prev, ...newFiles.slice(0, remainingSlots)]);
+  };
+
+  // ❌ remove
+  const removeFile = (index: number) => {
+    setFiles((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  // 📸 capture
+  const capturePhoto = () => {
+    if (files.length >= maxPhotos) {
+      toast.error(`Max ${maxPhotos} images reached`);
+      return;
+    }
+
+    if (!webcamRef.current) return;
+
+    const imageSrc = webcamRef.current.getScreenshot();
+    if (!imageSrc) return;
+
+    const byteString = atob(imageSrc.split(",")[1]);
+    const mimeString = imageSrc.split(",")[0].split(":")[1].split(";")[0];
+
+    const ab = new ArrayBuffer(byteString.length);
+    const ia = new Uint8Array(ab);
+
+    for (let i = 0; i < byteString.length; i++) {
+      ia[i] = byteString.charCodeAt(i);
+    }
+
+    const file = new File([ab], "camera.jpg", { type: mimeString });
+
+    setFiles((prev) => [...prev, file].slice(0, maxPhotos));
+    setShowCamera(false);
+  };
+
+  // 🎯 simple center effect (visual only)
+  useEffect(() => {
+    if (!showCamera) return;
+
+    const interval = setInterval(() => {
+      const centered = Math.random() > 0.5;
+
+      setIsCentered(centered);
+
+      if (centered) {
+        playSound();
+      }
+    }, 2000);
+
+    return () => clearInterval(interval);
+  }, [showCamera]);
+
+  // 🚀 analyze
+  const handleAnalyze = async () => {
+    if (!files.length) return toast.error("Upload at least one photo");
+
+    if (!isInitialized) return toast.error("Auth initializing...");
+    if (!isAuthenticated) {
+      login("/upload");
+      return;
+    }
+
+    setUploading(true);
+
+    const formData = new FormData();
+    formData.append("image", files[0]);
+
+    try {
       await refreshNow();
 
-      const formData = new FormData();
-      formData.append("image", file);
-
       const API = (import.meta.env.VITE_API_URL as string) || "http://localhost:3000";
-      const response = await fetch(`${API}/scanner/analyze-product-image`, {
+      const res = await fetch(`${API}/ai/analyze`, {
         method: "POST",
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
+        headers: { Authorization: `Bearer ${token}` },
         body: formData,
       });
 
-      const data = await response.json();
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.message || "Error");
 
-      if (!response.ok) {
-        throw new Error(
-          typeof data?.message === "string"
-            ? data.message
-            : data?.error || "Failed to analyze product image",
-        );
-      }
-
-      setScannedProduct(data);
-    } catch (error: any) {
-      console.error("Scanner image error:", error);
-      setErrorMessage(error?.message || "Failed to analyze product image");
+      localStorage.setItem("skinAnalysisResult", JSON.stringify(data));
+      navigate("/results");
+    } catch (err: any) {
+      toast.error(err.message);
     } finally {
-      setScanning(false);
+      setUploading(false);
     }
   };
-
-  const handleManualSearch = () => {
-    if (!searchQuery.trim()) return;
-    analyzeProduct(searchQuery);
-    setSearchQuery("");
-  };
-
-  const handleCameraFileChange = async (
-    e: React.ChangeEvent<HTMLInputElement>,
-  ) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    await analyzeProductImage(file);
-    e.target.value = "";
-  };
-
-  const handleGalleryFileChange = async (
-    e: React.ChangeEvent<HTMLInputElement>,
-  ) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    await analyzeProductImage(file);
-    e.target.value = "";
-  };
-
-  const getCompatibilityColor = (compatibility: string) => {
-    switch (compatibility) {
-      case "excellent":
-        return "from-green-400 to-emerald-500";
-      case "good":
-        return "from-blue-400 to-cyan-500";
-      case "caution":
-        return "from-amber-400 to-orange-500";
-      case "avoid":
-        return "from-red-400 to-rose-500";
-      default:
-        return "from-gray-400 to-gray-500";
-    }
-  };
-
-  const getCompatibilityIcon = (compatibility: string) => {
-    switch (compatibility) {
-      case "excellent":
-      case "good":
-        return <CheckCircle className="w-6 h-6" />;
-      case "caution":
-        return <AlertTriangle className="w-6 h-6" />;
-      case "avoid":
-        return <X className="w-6 h-6" />;
-      default:
-        return <Info className="w-6 h-6" />;
-    }
-  };
-
-  const getIngredientColor = (status: string) => {
-    switch (status) {
-      case "beneficial":
-        return "bg-green-100 text-green-800 border-green-200";
-      case "neutral":
-        return "bg-blue-100 text-blue-800 border-blue-200";
-      case "problematic":
-        return "bg-red-100 text-red-800 border-red-200";
-      default:
-        return "bg-gray-100 text-gray-800 border-gray-200";
-    }
-  };
-
-  if (!isAuthenticated) {
-    return (
-      <motion.div
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        className="min-h-screen bg-gradient-to-br from-[#fff8f3] via-[#fff0eb] to-[#ffe8dc] dark:from-[#1a0f0c] dark:via-[#2d1a15] dark:to-[#241208] flex items-center justify-center p-4 overflow-hidden"
-      >
-        {/* Background particles */}
-        <div className="absolute inset-0 pointer-events-none">
-          {[...Array(20)].map((_, i) => (
-            <motion.div
-              key={i}
-              className="absolute w-1 h-1 rounded-full bg-purple-400/30"
-              style={{
-                left: `${Math.random() * 100}%`,
-                top: `${Math.random() * 100}%`,
-              }}
-              animate={{
-                y: [0, -100, 0],
-                opacity: [0.2, 0.8, 0.2],
-              }}
-              transition={{
-                duration: 5 + Math.random() * 5,
-                repeat: Infinity,
-                ease: "easeInOut",
-                delay: Math.random() * 2,
-              }}
-            />
-          ))}
-        </div>
-
-        <GlassCard className="relative z-10 bg-gradient-to-br from-orange-900/40 to-pink-900/40 border border-orange-500/30 p-8 text-center max-w-lg w-full">
-          <motion.div
-            initial={{ scale: 0 }}
-            animate={{ scale: 1 }}
-            transition={{ duration: 0.5 }}
-            className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-gradient-to-br from-orange-500 to-pink-500 mb-4 shadow-lg shadow-orange-500/50"
-          >
-            <Scan className="w-8 h-8 text-white" />
-          </motion.div>
-          <h2 className="text-2xl font-bold text-white mb-3">AI Scan Lab</h2>
-          <p className="text-orange-100 mb-6">
-            Unlock the power of intelligent product analysis by logging in with your skin profile.
-          </p>
-          <button
-            onClick={() => login("/scanner")}
-            className="bg-gradient-to-r from-orange-500 to-pink-500 text-white px-6 py-3 rounded-xl font-semibold hover:shadow-lg hover:shadow-orange-500/50 transition-all duration-300"
-          >
-            Enter Lab
-          </button>
-        </GlassCard>
-      </motion.div>
-    );
-  }
 
   return (
-    <div className="relative min-h-screen overflow-hidden bg-gradient-to-br from-[#fff8f3] via-[#fff0eb] to-[#ffe8dc] dark:from-[#1a0f0c] dark:via-[#2d1a15] dark:to-[#241208]">
-      {/* ATMOSPHERIC BACKGROUND */}
-      <div className="fixed inset-0 pointer-events-none overflow-hidden z-0">
-        {/* Animated gradient orbs */}
-        <motion.div
-          className="absolute -top-40 -right-40 w-96 h-96 rounded-full blur-3xl"
-          style={{
-            background: "radial-gradient(circle, rgba(255, 138, 122, 0.3), rgba(236, 72, 153, 0.1), transparent)",
-          }}
-          animate={{ x: [0, 80, 0], y: [0, 40, 0] }}
-          transition={{ duration: 15, repeat: Infinity, ease: "easeInOut" }}
-        />
-        <motion.div
-          className="absolute -bottom-32 -left-32 w-80 h-80 rounded-full blur-3xl"
-          style={{
-            background: "radial-gradient(circle, rgba(168, 85, 247, 0.2), rgba(255, 138, 122, 0.1), transparent)",
-          }}
-          animate={{ x: [0, -60, 0], y: [0, -50, 0] }}
-          transition={{ duration: 18, repeat: Infinity, ease: "easeInOut" }}
-        />
-        <motion.div
-          className="absolute top-1/2 -right-64 w-96 h-96 rounded-full blur-3xl"
-          style={{
-            background: "radial-gradient(circle, rgba(236, 72, 153, 0.15), rgba(255, 160, 130, 0.05), transparent)",
-          }}
-          animate={{ x: [0, -100, 0], y: [0, 80, 0] }}
-          transition={{ duration: 20, repeat: Infinity, ease: "easeInOut" }}
-        />
+    <PageTransition direction="left">
+      <div className="relative isolate min-h-screen overflow-hidden bg-[#f4edf9] dark:bg-[#1a0f2e] flex items-center justify-center p-4 pt-24 sm:p-6 sm:pt-20">
+        {/* AI BACKGROUND LAYERS */}
+        <div className="pointer-events-none absolute inset-0 z-0">
+          <motion.img
+            src={cameraCrystal}
+            alt=""
+            aria-hidden="true"
+            className="absolute right-[6%] top-[14%] w-[280px] sm:w-[340px] opacity-[0.28] blur-[0.4px]"
+            style={{ filter: "drop-shadow(0 20px 42px rgba(165,103,255,0.28))" }}
+            animate={{ y: [0, -22, 0], x: [0, -16, 0], rotate: [0, 1.8, 0] }}
+            transition={{ duration: 10, repeat: Infinity, ease: "easeInOut" }}
+          />
 
-        {/* Grid pattern */}
-        <div
-          className="absolute inset-0 opacity-[0.08] dark:opacity-[0.12]"
-          style={{
-            backgroundImage:
-              "linear-gradient(rgba(220, 100, 80, 0.3) 1px, transparent 1px), linear-gradient(90deg, rgba(220, 100, 80, 0.3) 1px, transparent 1px)",
-            backgroundSize: "60px 60px",
-          }}
-        />
+          <motion.img
+            src={cameraCrystal}
+            alt=""
+            aria-hidden="true"
+            className="absolute left-[5%] bottom-[8%] w-[190px] sm:w-[240px] opacity-[0.18] scale-x-[-1]"
+            style={{ filter: "drop-shadow(0 14px 36px rgba(165,103,255,0.2))" }}
+            animate={{ y: [0, 16, 0], x: [0, 12, 0], rotate: [0, -1.6, 0] }}
+            transition={{ duration: 12, repeat: Infinity, ease: "easeInOut" }}
+          />
 
-        {/* Floating particles */}
-        {[0, 1, 2, 3, 4, 5, 6, 7].map((i) => (
-          <motion.div
-            key={i}
-            className="absolute w-1 h-1 rounded-full bg-orange-400/40"
+          <div
+            className="absolute inset-0"
             style={{
-              left: `${20 + i * 10}%`,
-              top: `${20 + i * 12}%`,
-            }}
-            animate={{
-              y: [0, -60, 0],
-              opacity: [0.1, 0.6, 0.1],
-            }}
-            transition={{
-              duration: 5 + i * 0.5,
-              repeat: Infinity,
-              ease: "easeInOut",
-              delay: i * 0.3,
+              background:
+                "radial-gradient(1200px 620px at 10% 10%, rgba(249,188,218,0.48), transparent 60%), radial-gradient(980px 560px at 90% 15%, rgba(196,145,255,0.42), transparent 58%), radial-gradient(820px 500px at 50% 92%, rgba(255,201,174,0.36), transparent 58%)",
             }}
           />
-        ))}
 
-        {/* Light streaks */}
-        <motion.div
-          className="absolute top-1/4 left-0 w-96 h-1 bg-gradient-to-r from-transparent via-orange-300/20 to-transparent blur-md"
-          animate={{ x: [-400, 800], opacity: [0, 0.5, 0] }}
-          transition={{ duration: 8, repeat: Infinity, ease: "linear" }}
-        />
-        <motion.div
-          className="absolute bottom-1/3 right-0 w-96 h-1 bg-gradient-to-r from-transparent via-pink-400/20 to-transparent blur-md"
-          animate={{ x: [400, -800], opacity: [0, 0.5, 0] }}
-          transition={{ duration: 10, repeat: Infinity, ease: "linear", delay: 1 }}
-        />
-      </div>
-
-      {/* MAIN CONTENT */}
-      <div className="relative z-10 min-h-screen flex flex-col items-center justify-center p-6">
-        <input
-          ref={cameraInputRef}
-          type="file"
-          accept="image/*"
-          capture="environment"
-          className="hidden"
-          onChange={handleCameraFileChange}
-        />
-
-        <input
-          ref={galleryInputRef}
-          type="file"
-          accept="image/*"
-          className="hidden"
-          onChange={handleGalleryFileChange}
-        />
-
-        {/* Header */}
-        <motion.div
-          initial={{ opacity: 0, y: -30 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.6 }}
-          className="text-center mb-20"
-        >
           <motion.div
-            animate={{ rotate: 360 }}
-            transition={{ duration: 20, repeat: Infinity, ease: "linear" }}
-            className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-gradient-to-br from-orange-500 to-pink-500 mb-4 shadow-lg shadow-orange-500/40"
+            className="absolute -top-28 -left-24 h-[420px] w-[420px] rounded-full bg-[radial-gradient(circle_at_center,rgba(252,197,223,0.62),rgba(252,197,223,0)_70%)] blur-3xl"
+            animate={{ x: [0, 52, 0], y: [0, 30, 0] }}
+            transition={{ duration: 18, repeat: Infinity, ease: "easeInOut" }}
+          />
+          <motion.div
+            className="absolute top-[22%] -right-28 h-[440px] w-[440px] rounded-full bg-[radial-gradient(circle_at_center,rgba(205,171,255,0.52),rgba(205,171,255,0)_70%)] blur-3xl"
+            animate={{ x: [0, -42, 0], y: [0, -26, 0] }}
+            transition={{ duration: 20, repeat: Infinity, ease: "easeInOut" }}
+          />
+          <motion.div
+            className="absolute -bottom-32 left-[24%] h-[420px] w-[420px] rounded-full bg-[radial-gradient(circle_at_center,rgba(255,199,173,0.48),rgba(255,199,173,0)_72%)] blur-3xl"
+            animate={{ x: [0, 36, 0], y: [0, -32, 0] }}
+            transition={{ duration: 22, repeat: Infinity, ease: "easeInOut" }}
+          />
+
+          <motion.div
+            className="absolute -left-[35%] top-[-20%] h-[180%] w-[55%] rotate-[16deg] opacity-[0.3]"
+            style={{
+              background:
+                "linear-gradient(180deg, rgba(255,255,255,0), rgba(247,189,220,0.94), rgba(196,145,255,0.7), rgba(255,255,255,0))",
+              filter: "blur(42px)",
+            }}
+            animate={{ x: ["0%", "280%"] }}
+            transition={{ duration: 10, repeat: Infinity, ease: "linear" }}
+          />
+
+          {/* Floating AI particles */}
+          <motion.div
+            className="absolute left-[5%] top-[18%] h-36 w-36 rounded-full bg-[radial-gradient(circle_at_30%_30%,rgba(255,218,236,0.98),rgba(255,218,236,0))] blur-2xl"
+            animate={{ x: [0, 78, 0], y: [0, -52, 0], scale: [1, 1.08, 1] }}
+            transition={{ duration: 11, repeat: Infinity, ease: "easeInOut" }}
+          />
+          <motion.div
+            className="absolute right-[7%] top-[30%] h-32 w-32 rounded-full bg-[radial-gradient(circle_at_40%_35%,rgba(210,183,255,0.94),rgba(210,183,255,0))] blur-2xl"
+            animate={{ x: [0, -64, 0], y: [0, 42, 0], scale: [1, 1.1, 1] }}
+            transition={{ duration: 12, repeat: Infinity, ease: "easeInOut" }}
+          />
+          <motion.div
+            className="absolute left-[16%] bottom-[11%] h-28 w-28 rounded-full bg-[radial-gradient(circle_at_center,rgba(255,218,193,0.92),rgba(255,218,193,0))] blur-xl"
+            animate={{ x: [0, 54, 0], y: [0, -34, 0], scale: [1, 1.08, 1] }}
+            transition={{ duration: 10, repeat: Infinity, ease: "easeInOut" }}
+          />
+          <motion.div
+            className="absolute right-[14%] bottom-[16%] h-40 w-40 rounded-full bg-[radial-gradient(circle_at_center,rgba(233,198,255,0.84),rgba(233,198,255,0))] blur-2xl"
+            animate={{ x: [0, -58, 0], y: [0, -40, 0], scale: [1, 1.08, 1] }}
+            transition={{ duration: 14, repeat: Infinity, ease: "easeInOut" }}
+          />
+          {["left-[10%] top-[12%]", "left-[84%] top-[16%]", "left-[78%] top-[72%]", "left-[20%] top-[70%]", "left-[64%] top-[26%]", "left-[35%] top-[82%]"]
+            .map((position, index) => (
+              <motion.span
+                key={position}
+                className={`absolute ${position} h-2.5 w-2.5 rounded-full bg-white/80 shadow-[0_0_18px_rgba(245,183,220,0.72)]`}
+                animate={{ y: [0, -24, 0], x: [0, 8, 0], opacity: [0.4, 1, 0.4] }}
+                transition={{ duration: 4 + index * 0.5, repeat: Infinity, ease: "easeInOut" }}
+              />
+            ))}
+
+          <div
+            className="absolute inset-0 opacity-[0.1] dark:opacity-[0.14]"
+            style={{
+              backgroundImage:
+                "linear-gradient(rgba(139,99,211,0.22) 1px, transparent 1px), linear-gradient(90deg, rgba(139,99,211,0.18) 1px, transparent 1px)",
+              backgroundSize: "52px 52px",
+            }}
+          />
+
+          <div
+            className="absolute inset-0 opacity-[0.12] dark:opacity-[0.16]"
+            style={{
+              backgroundImage:
+                "radial-gradient(circle at center, rgba(139,99,211,0.35) 1px, transparent 1.2px)",
+              backgroundSize: "30px 30px",
+            }}
+          />
+
+          <motion.div
+            className="absolute inset-0 opacity-[0.14] dark:opacity-[0.2]"
+            style={{
+              backgroundImage:
+                "repeating-linear-gradient(180deg, rgba(139,99,211,0.3) 0px, rgba(139,99,211,0.3) 1px, transparent 1px, transparent 10px)",
+            }}
+            animate={{ y: [0, 34, 0] }}
+            transition={{ duration: 9, repeat: Infinity, ease: "linear" }}
+          />
+        </div>
+
+        <div className="relative z-10 w-full max-w-6xl">
+          {/* Progress bar */}
+          <motion.div
+            initial={{ opacity: 0, y: -20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.6 }}
+            className="mb-12"
           >
-            <Scan className="w-8 h-8 text-white" />
+            <ProgressIndicator currentStep={3} totalSteps={4} />
           </motion.div>
-          <h1 className="text-5xl md:text-6xl font-bold bg-gradient-to-r from-orange-600 via-pink-600 to-orange-600 bg-clip-text text-transparent mb-3">
-            AI Scan Lab
-          </h1>
-          <p className="text-orange-700 dark:text-orange-300 text-lg max-w-2xl mx-auto">
-            Intelligent product analysis powered by advanced AI
-          </p>
-        </motion.div>
 
-        {/* Error Message */}
-        <AnimatePresence>
-          {errorMessage && (
+          {/* Main scanner interface */}
+          <div className="flex flex-col items-center gap-12">
+            {/* Header */}
             <motion.div
-              initial={{ opacity: 0, y: -20 }}
+              initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -20 }}
-              className="mb-8 max-w-md mx-auto w-full"
+              transition={{ duration: 0.6, delay: 0.1 }}
+              className="text-center space-y-3"
             >
-              <GlassCard className="bg-red-100/80 dark:bg-red-500/20 border border-red-300 dark:border-red-400/50 p-4">
-                <div className="flex items-center gap-3">
-                  <AlertTriangle className="w-5 h-5 text-red-600 dark:text-red-400 flex-shrink-0" />
-                  <span className="text-red-700 dark:text-red-200">{errorMessage}</span>
-                </div>
-              </GlassCard>
+              <h2 className="text-3xl md:text-4xl font-semibold text-gray-800 dark:text-white">
+                AI Skin Scanner
+              </h2>
+              <p className="text-gray-500 text-sm md:text-base max-w-xl mx-auto">
+                Upload up to {maxPhotos} clear photos for advanced AI analysis
+              </p>
+
+              <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-white/80 border border-[#ead9fb] shadow-[0_10px_24px_rgba(139,99,211,0.08)]">
+                <Crown className="w-4 h-4 text-[#8b63d3]" />
+                <span className="text-sm font-semibold">
+                  {maxPhotos} Image{maxPhotos > 1 ? 's' : ''} Limit
+                </span>
+              </div>
             </motion.div>
-          )}
-        </AnimatePresence>
 
-        {!scannedProduct ? (
-          <>
-            {/* AI SCAN CORE - Central Orb */}
+            {/* Scanner Core Section */}
             <motion.div
-              initial={{ scale: 0 }}
-              animate={{ scale: 1 }}
-              transition={{ duration: 0.8, type: "spring", stiffness: 100 }}
-              className="relative w-64 h-64 mx-auto mb-12"
+              initial={{ opacity: 0, scale: 0.9 }}
+              animate={{ opacity: 1, scale: 1 }}
+              transition={{ duration: 0.6, delay: 0.2 }}
+              className="relative w-full flex items-center justify-center"
+              style={{ height: 400 }}
             >
-              {/* Outer pulsing ring */}
-              {scanning && (
-                <>
-                  <motion.div
-                    className="absolute inset-0 rounded-full border-2 border-orange-400/40"
-                    animate={{ scale: [1, 1.3], opacity: [0.8, 0] }}
-                    transition={{ duration: 1.5, repeat: Infinity }}
-                  />
-                  <motion.div
-                    className="absolute inset-0 rounded-full border-2 border-pink-400/40"
-                    animate={{ scale: [1, 1.5, 1], opacity: [0, 0.6, 0] }}
-                    transition={{ duration: 2, repeat: Infinity, delay: 0.2 }}
-                  />
-                </>
-              )}
-
-              {/* Scanning lines */}
-              {scanning && (
-                <svg className="absolute inset-0 w-full h-full" viewBox="0 0 256 256">
-                  {[...Array(6)].map((_, i) => (
-                    <motion.line
-                      key={i}
-                      x1="128"
-                      y1="0"
-                      x2="128"
-                      y2="256"
-                      stroke="rgba(255, 138, 122, 0.3)"
-                      strokeWidth="1"
-                      animate={{
-                        strokeOpacity: [0.1, 0.6, 0.1],
-                        x1: [128 + Math.cos((i / 6) * Math.PI * 2) * 60, 128],
-                        x2: [128 + Math.cos((i / 6) * Math.PI * 2) * 60, 128],
-                      }}
-                      transition={{
-                        duration: 2,
-                        repeat: Infinity,
-                        delay: (i / 6) * 0.3,
-                      }}
-                    />
-                  ))}
-                </svg>
-              )}
-
-              {/* Main Orb */}
+              {/* Counter above scanner */}
               <motion.div
-                animate={{
-                  y: scanning ? [0, -10, 0] : [0, -5, 0],
-                  scale: scanning ? [1, 1.08, 1] : [1, 1.05, 1],
-                }}
-                transition={{
-                  duration: scanning ? 1 : 2,
-                  repeat: Infinity,
-                  ease: "easeInOut",
-                }}
-                className="absolute inset-0 rounded-full bg-gradient-to-br from-orange-400 via-pink-500 to-orange-500 shadow-2xl shadow-orange-400/40 flex items-center justify-center overflow-hidden"
+                className="absolute -top-16 left-1/2 -translate-x-1/2 px-6 py-3 rounded-full border border-[#eddffb] bg-white/70 dark:bg-purple-900/20 backdrop-blur-xl shadow-lg"
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: 0.3 }}
               >
-                {/* Orb shine */}
-                <div className="absolute inset-0 rounded-full bg-gradient-to-br from-white/30 to-transparent" />
-
-                {/* Content inside orb */}
-                {scanning ? (
-                  <div className="flex flex-col items-center gap-3 text-white z-10">
-                    <motion.div
-                      animate={{ rotate: 360 }}
-                      transition={{ duration: 2, repeat: Infinity, ease: "linear" }}
-                    >
-                      <Scan className="w-12 h-12" />
-                    </motion.div>
-                    <p className="text-lg font-semibold text-center">Analyzing...</p>
+                <div className="flex items-center gap-3">
+                  <span className="text-sm text-gray-700 dark:text-gray-300 font-medium">
+                    <strong className="text-[#8b63d3]">{files.length}</strong> / {maxPhotos} photos
+                  </span>
+                  <div className="flex gap-1">
+                    {Array.from({ length: maxPhotos }).map((_, index) => (
+                      <div
+                        key={index}
+                        className={`w-2 h-2 rounded-full transition-all ${
+                          index < files.length
+                            ? "bg-[#8b63d3] scale-110"
+                            : "bg-gray-300 dark:bg-gray-600"
+                        }`}
+                      />
+                    ))}
                   </div>
-                ) : (
-                  <motion.div
-                    animate={{ scale: [1, 1.1, 1] }}
-                    transition={{ duration: 2, repeat: Infinity }}
-                    className="text-white z-10"
-                  >
-                    <Sparkles className="w-12 h-12" />
-                  </motion.div>
-                )}
+                </div>
               </motion.div>
+
+              {/* Scanner Core */}
+              <ScannerCore isScanning={uploading} />
+
+              {/* Action Buttons */}
+              <ScannerActions
+                onCamera={() => {
+                  if (isLimitReached) {
+                    toast.error(`Max ${maxPhotos} images reached`);
+                    return;
+                  }
+                  initSound();
+                  setShowCamera(true);
+                }}
+                onUpload={() => {
+                  if (!isLimitReached) {
+                    // Trigger hidden file input
+                    const fileInput = document.getElementById("file-input") as HTMLInputElement;
+                    fileInput?.click();
+                  }
+                }}
+                disabled={isLimitReached}
+              />
             </motion.div>
 
-            {/* Action Buttons around the orb */}
-            <motion.div
-              className="relative w-96 h-96 mx-auto mb-12"
-              initial={{ scale: 0 }}
-              animate={{ scale: 1 }}
-              transition={{ duration: 0.8, delay: 0.2 }}
-            >
-              {/* Camera Button - Left */}
-              <motion.button
-                onClick={() => !scanning && cameraInputRef.current?.click()}
-                disabled={scanning}
-                className="absolute left-0 top-1/2 -translate-y-1/2 z-20"
-                whileHover={{ scale: 1.15 }}
-                whileTap={{ scale: 0.95 }}
+            {/* Photo Preview Grid */}
+            {files.length > 0 && (
+              <motion.div
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ duration: 0.5 }}
+                className="w-full"
               >
-                <GlassCard className="w-24 h-24 rounded-full bg-gradient-to-br from-orange-400/40 to-orange-500/40 border border-orange-400/70 dark:border-orange-400/50 flex items-center justify-center shadow-lg shadow-orange-400/30 hover:shadow-orange-400/50 transition-all">
-                  <Camera className="w-8 h-8 text-orange-700 dark:text-orange-400" />
-                </GlassCard>
-                <p className="text-sm text-orange-700 dark:text-orange-300 text-center mt-2 whitespace-nowrap font-medium">Camera</p>
-              </motion.button>
+                <p className="text-center text-sm font-semibold text-gray-700 dark:text-gray-300 mb-4">
+                  Selected Photos
+                </p>
+                <div className="flex justify-center">
+                  <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4 max-w-2xl">
+                    <AnimatePresence>
+                      {files.map((file, index) => (
+                        <motion.div
+                          key={`${file.name}-${index}`}
+                          initial={{ opacity: 0, scale: 0.7 }}
+                          animate={{ opacity: 1, scale: 1 }}
+                          exit={{ opacity: 0, scale: 0.7 }}
+                          className="relative group"
+                        >
+                          <motion.div
+                            className="aspect-square rounded-2xl overflow-hidden border border-[#eddffb] bg-white/40 backdrop-blur-sm"
+                            whileHover={{ scale: 1.08 }}
+                          >
+                            <img
+                              src={previewUrls[index]}
+                              className="w-full h-full object-cover"
+                            />
+                            <div className="absolute inset-0 bg-gradient-to-br from-white/20 to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
+                          </motion.div>
 
-              {/* Upload Button - Right */}
-              <motion.button
-                onClick={() => !scanning && galleryInputRef.current?.click()}
-                disabled={scanning}
-                className="absolute right-0 top-1/2 -translate-y-1/2 z-20"
-                whileHover={{ scale: 1.15 }}
-                whileTap={{ scale: 0.95 }}
-              >
-                <GlassCard className="w-24 h-24 rounded-full bg-gradient-to-br from-pink-400/40 to-pink-500/40 border border-pink-400/70 dark:border-pink-400/50 flex items-center justify-center shadow-lg shadow-pink-400/30 hover:shadow-pink-400/50 transition-all">
-                  <ImageIcon className="w-8 h-8 text-pink-700 dark:text-pink-400" />
-                </GlassCard>
-                <p className="text-sm text-pink-700 dark:text-pink-300 text-center mt-2 whitespace-nowrap font-medium">Upload</p>
-              </motion.button>
+                          <button
+                            onClick={() => removeFile(index)}
+                            className="absolute -top-2 -right-2 w-7 h-7 bg-red-500 text-white rounded-full flex items-center justify-center opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity shadow-lg hover:bg-red-600"
+                            aria-label="Remove photo"
+                          >
+                            <X size={14} />
+                          </button>
+                        </motion.div>
+                      ))}
+                    </AnimatePresence>
+                  </div>
+                </div>
+              </motion.div>
+            )}
 
-              {/* Search Button - Bottom */}
-              <motion.button
-                onClick={() => setSearchQuery("")}
-                disabled={scanning}
-                className="absolute left-1/2 bottom-0 -translate-x-1/2 z-20"
-                whileHover={{ scale: 1.15 }}
-                whileTap={{ scale: 0.95 }}
-              >
-                <GlassCard className="w-24 h-24 rounded-full bg-gradient-to-br from-cyan-400/40 to-cyan-500/40 border border-cyan-400/70 dark:border-cyan-400/50 flex items-center justify-center shadow-lg shadow-cyan-400/30 hover:shadow-cyan-400/50 transition-all">
-                  <Search className="w-8 h-8 text-cyan-700 dark:text-cyan-400" />
-                </GlassCard>
-                <p className="text-sm text-cyan-700 dark:text-cyan-300 text-center mt-2 whitespace-nowrap font-medium">Search</p>
-              </motion.button>
-            </motion.div>
-
-            {/* Manual Search Panel */}
+            {/* Analyze Button */}
             <motion.div
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
               transition={{ duration: 0.6, delay: 0.3 }}
-              className="w-full max-w-2xl mx-auto mb-12"
+              className="w-full max-w-md"
             >
-              <GlassCard className="bg-white/60 dark:bg-slate-900/60 border border-orange-200/40 dark:border-orange-700/30 p-6 backdrop-blur-xl">
-                <h3 className="text-lg font-semibold text-gray-800 dark:text-white mb-4">Manual Search</h3>
-                <div className="flex gap-3">
-                  <input
-                    type="text"
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    onKeyDown={(e) => e.key === "Enter" && handleManualSearch()}
-                    placeholder="Enter product name or barcode..."
-                    className="flex-1 px-4 py-3 rounded-xl bg-white/80 dark:bg-gray-900/40 border border-orange-300/40 dark:border-orange-500/40 text-gray-800 dark:text-white placeholder-gray-500 dark:placeholder-gray-400 focus:border-orange-400/80 focus:ring-2 focus:ring-orange-500/30 outline-none transition-all"
-                  />
-                  <motion.button
-                    onClick={handleManualSearch}
-                    disabled={scanning}
-                    whileHover={{ scale: 1.05 }}
-                    whileTap={{ scale: 0.95 }}
-                    className="px-6 py-3 bg-gradient-to-r from-orange-500 to-pink-500 text-white rounded-xl font-semibold hover:shadow-lg hover:shadow-orange-500/30 disabled:opacity-50 transition-all"
-                  >
-                    Analyze
-                  </motion.button>
-                </div>
-              </GlassCard>
+              <motion.div
+                whileHover={!uploading ? { scale: 1.02 } : {}}
+                whileTap={!uploading ? { scale: 0.98 } : {}}
+              >
+                <Button
+                  glow
+                  className="w-full h-14 text-lg font-semibold bg-gradient-to-r from-[#8b63d3] via-[#c95785] to-[#e8a1c0] hover:from-[#7a5325] hover:via-[#b83f6f] hover:to-[#d68fb0]"
+                  onClick={handleAnalyze}
+                  disabled={uploading || files.length === 0}
+                >
+                  {uploading ? (
+                    <motion.div
+                      animate={{ rotate: 360 }}
+                      transition={{ duration: 1, repeat: Infinity, ease: "linear" }}
+                      className="inline-block mr-2"
+                    >
+                      ◆
+                    </motion.div>
+                  ) : (
+                    "↗"
+                  )}
+                  {uploading ? "Analyzing Your Skin..." : "Analyze My Skin"}
+                </Button>
+              </motion.div>
             </motion.div>
 
-            {/* Example Scans */}
+            {/* Tips Card */}
             <motion.div
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
               transition={{ duration: 0.6, delay: 0.4 }}
-              className="w-full max-w-3xl mx-auto"
+              className="w-full"
             >
-              <h3 className="text-center text-lg font-semibold text-gray-800 dark:text-white mb-6">Try Sample Analyses</h3>
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                {[
-                  { name: "Vitamin C Brightening Serum", status: "excellent" },
-                  { name: "Retinol Night Treatment", status: "caution" },
-                  { name: "Heavy Mineral Oil Cream", status: "avoid" },
-                ].map((example, idx) => (
-                  <motion.button
-                    key={idx}
-                    onClick={() => analyzeProduct(example.name)}
-                    disabled={scanning}
-                    whileHover={{ scale: 1.05 }}
-                    whileTap={{ scale: 0.95 }}
-                    className="disabled:opacity-50"
-                  >
-                    <GlassCard className="bg-white/70 dark:bg-slate-900/50 border border-orange-200/40 dark:border-orange-700/30 p-4 hover:border-orange-400/80 dark:hover:border-orange-500/60 transition-all">
-                      <div className="flex items-center gap-3">
-                        {example.status === "excellent" && (
-                          <div className="w-10 h-10 rounded-full bg-green-500/30 flex items-center justify-center">
-                            <CheckCircle className="w-6 h-6 text-green-600 dark:text-green-400" />
-                          </div>
-                        )}
-                        {example.status === "caution" && (
-                          <div className="w-10 h-10 rounded-full bg-amber-500/30 flex items-center justify-center">
-                            <AlertTriangle className="w-6 h-6 text-amber-600 dark:text-amber-400" />
-                          </div>
-                        )}
-                        {example.status === "avoid" && (
-                          <div className="w-10 h-10 rounded-full bg-red-500/30 flex items-center justify-center">
-                            <X className="w-6 h-6 text-red-600 dark:text-red-400" />
-                          </div>
-                        )}
-                        <span className="text-sm text-gray-700 dark:text-gray-300 flex-1 text-left">{example.name}</span>
-                      </div>
-                    </GlassCard>
-                  </motion.button>
-                ))}
-              </div>
+              <GlassCard className="bg-white/75 border border-[#eddffb] dark:bg-purple-900/20 p-6 backdrop-blur-xl">
+                <div className="flex items-start gap-3">
+                  <Info className="w-5 h-5 text-[#8b63d3] mt-1 flex-shrink-0" />
+                  <div className="text-sm text-gray-700 dark:text-gray-300">
+                    <p className="mb-3 font-semibold">For best results, capture from multiple angles:</p>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                      <ul className="list-disc list-inside space-y-1 text-gray-600 dark:text-gray-400">
+                        <li>Front view (face forward)</li>
+                        <li>Left side profile</li>
+                        <li>Right side profile</li>
+                      </ul>
+                      <ul className="list-disc list-inside space-y-1 text-gray-600 dark:text-gray-400">
+                        <li>Use natural lighting</li>
+                        <li>Remove makeup if possible</li>
+                        <li>Ensure photos are clear and focused</li>
+                      </ul>
+                    </div>
+                  </div>
+                </div>
+              </GlassCard>
             </motion.div>
-          </>
-        ) : (
-          /* Results Display - Floating Panels */
+          </div>
+
+          {/* Hidden file input */}
+          <input
+            id="file-input"
+            type="file"
+            hidden
+            multiple
+            accept="image/*"
+            onChange={handleFileChange}
+          />
+        </div>
+
+        {/* CAMERA MODAL - Enhanced UI */}
+        {showCamera && (
           <motion.div
-            initial={{ scale: 0, opacity: 0 }}
-            animate={{ scale: 1, opacity: 1 }}
-            transition={{ duration: 0.6, type: "spring", stiffness: 100 }}
-            className="max-w-7xl mx-auto w-full"
+            className="fixed inset-0 bg-black/80 backdrop-blur-xl flex items-center justify-center z-50 p-4"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.3 }}
           >
-            {/* Header */}
             <motion.div
-              initial={{ opacity: 0, y: -20 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ duration: 0.6, delay: 0.1 }}
-              className="text-center mb-12"
+              className="relative w-[min(95vw,800px)]"
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              transition={{ duration: 0.3 }}
             >
-              <h2 className="text-4xl font-bold text-gray-800 dark:text-white mb-2">Analysis Complete</h2>
-              <p className="text-orange-700 dark:text-orange-300">Product scan results</p>
-            </motion.div>
+              <Webcam
+                ref={webcamRef}
+                screenshotFormat="image/jpeg"
+                videoConstraints={{ facingMode: "user" }}
+                className="w-full rounded-3xl shadow-[0_20px_60px_rgba(0,0,0,0.6)]"
+              />
 
-            {/* Product Image Panel - Top */}
-            <motion.div
-              initial={{ opacity: 0, y: -30 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ duration: 0.6, delay: 0.2 }}
-              className="flex justify-center mb-12"
-            >
-              <GlassCard className="bg-white/70 dark:bg-slate-900/60 border border-orange-200/40 dark:border-orange-700/30 p-6 w-fit">
-                <img
-                  src={
-                    scannedProduct.image ||
-                    "https://via.placeholder.com/300x300/8b63d3/ffffff?text=Product"
-                  }
-                  alt={scannedProduct.name}
-                  className="w-40 h-40 rounded-2xl object-cover shadow-lg"
-                />
-              </GlassCard>
-            </motion.div>
-
-            {/* Product Info Panel - Center Top */}
-            <motion.div
-              initial={{ opacity: 0, x: -30 }}
-              animate={{ opacity: 1, x: 0 }}
-              transition={{ duration: 0.6, delay: 0.25 }}
-              className="mb-8"
-            >
-              <GlassCard className="bg-white/70 dark:bg-slate-900/60 border border-orange-200/40 dark:border-orange-700/30 p-6">
-                <h3 className="text-2xl font-bold text-gray-800 dark:text-white mb-2">{scannedProduct.name}</h3>
-                <p className="text-orange-700 dark:text-orange-300">{scannedProduct.brand}</p>
-              </GlassCard>
-            </motion.div>
-
-            {/* Main Grid - Compatibility Score & Details */}
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 mb-12">
-              {/* Compatibility Score - Left */}
-              <motion.div
-                initial={{ opacity: 0, scale: 0.8 }}
-                animate={{ opacity: 1, scale: 1 }}
-                transition={{ duration: 0.6, delay: 0.3 }}
-              >
-                <GlassCard className={`bg-gradient-to-br ${
-                  scannedProduct.compatibility === "excellent"
-                    ? "from-green-500/20 to-emerald-600/20 border-green-500/40"
-                    : scannedProduct.compatibility === "good"
-                    ? "from-blue-500/20 to-cyan-600/20 border-blue-500/40"
-                    : scannedProduct.compatibility === "caution"
-                    ? "from-amber-500/20 to-orange-600/20 border-amber-500/40"
-                    : "from-red-500/20 to-rose-600/20 border-red-500/40"
-                } border p-8 flex flex-col items-center justify-center h-full`}>
+              {/* 🎯 ENHANCED SCANNER OVAL GUIDE */}
+              <div className="absolute inset-0 flex items-center justify-center pointer-events-none rounded-3xl overflow-hidden">
+                <div className="relative h-80 w-64 sm:h-96 sm:w-72">
+                  {/* Main oval frame */}
                   <motion.div
-                    animate={{ rotate: 360 }}
-                    transition={{ duration: 4, repeat: Infinity, ease: "linear" }}
-                    className="mb-4"
-                  >
-                    <div className={`w-32 h-32 rounded-full flex items-center justify-center shadow-lg ${
-                      scannedProduct.compatibility === "excellent"
-                        ? "bg-gradient-to-r from-green-400 to-emerald-500"
-                        : scannedProduct.compatibility === "good"
-                        ? "bg-gradient-to-r from-blue-400 to-cyan-500"
-                        : scannedProduct.compatibility === "caution"
-                        ? "bg-gradient-to-r from-amber-400 to-orange-500"
-                        : "bg-gradient-to-r from-red-400 to-rose-500"
-                    }`}>
-                      <div className="text-center">
-                        <div className="text-4xl font-bold text-white">{scannedProduct.compatibilityScore}%</div>
-                        <div className="text-xs text-white/80 mt-1">MATCH</div>
-                      </div>
-                    </div>
-                  </motion.div>
-                  <p className="text-white font-semibold capitalize text-center mt-4">{scannedProduct.compatibility}</p>
-                </GlassCard>
-              </motion.div>
+                    className={`absolute inset-0 rounded-full border-2 transition-all duration-300 ${
+                      isCentered
+                        ? "border-emerald-300/90"
+                        : "border-white/50"
+                    }`}
+                    style={{
+                      boxShadow: isCentered
+                        ? "0 0 50px rgba(52,211,153,0.6), inset 0 0 40px rgba(52,211,153,0.3)"
+                        : "0 0 40px rgba(206,154,255,0.4), inset 0 0 30px rgba(245,183,220,0.25)",
+                    }}
+                    animate={{ scale: isCentered ? [1, 1.02, 1] : [1, 1.01, 1] }}
+                    transition={{ duration: 1.6, repeat: Infinity, ease: "easeInOut" }}
+                  />
 
-              {/* Ingredients - Center */}
-              <motion.div
-                initial={{ opacity: 0, scale: 0.8 }}
-                animate={{ opacity: 1, scale: 1 }}
-                transition={{ duration: 0.6, delay: 0.35 }}
-              >
-                <GlassCard className="bg-white/70 dark:bg-slate-900/60 border border-orange-200/40 dark:border-orange-700/30 p-6 h-full">
-                  <h4 className="text-lg font-bold text-gray-800 dark:text-white mb-4 flex items-center gap-2">
-                    <Sparkles className="w-5 h-5 text-orange-500" />
-                    Key Ingredients
-                  </h4>
-                  <div className="space-y-3">
-                    {scannedProduct.ingredients.slice(0, 4).map((ingredient, idx) => (
-                      <motion.div
-                        key={idx}
-                        initial={{ opacity: 0, x: -10 }}
-                        animate={{ opacity: 1, x: 0 }}
-                        transition={{ duration: 0.5, delay: 0.4 + idx * 0.1 }}
-                        className={`px-3 py-2 rounded-lg border text-sm font-medium ${
-                          ingredient.status === "beneficial"
-                            ? "bg-green-100 dark:bg-green-500/20 border-green-300 dark:border-green-400/50 text-green-700 dark:text-green-300"
-                            : ingredient.status === "neutral"
-                              ? "bg-blue-100 dark:bg-blue-500/20 border-blue-300 dark:border-blue-400/50 text-blue-700 dark:text-blue-300"
-                              : "bg-red-100 dark:bg-red-500/20 border-red-300 dark:border-red-400/50 text-red-700 dark:text-red-300"
-                        }`}
-                      >
-                        {ingredient.name}
-                      </motion.div>
-                    ))}
-                  </div>
-                </GlassCard>
-              </motion.div>
+                  {/* Inner frame */}
+                  <motion.div
+                    className="absolute inset-1 rounded-full border border-[#eebee2]/80"
+                    style={{
+                      boxShadow: "0 0 30px rgba(195,140,255,0.35)",
+                    }}
+                    animate={{ opacity: [0.5, 0.9, 0.5] }}
+                    transition={{ duration: 2.8, repeat: Infinity, ease: "easeInOut" }}
+                  />
 
-              {/* Layering Order - Right */}
-              <motion.div
-                initial={{ opacity: 0, scale: 0.8 }}
-                animate={{ opacity: 1, scale: 1 }}
-                transition={{ duration: 0.6, delay: 0.4 }}
-              >
-                <GlassCard className="bg-gradient-to-br from-cyan-100/70 to-blue-100/70 dark:from-cyan-900/40 dark:to-blue-900/40 border border-cyan-300/40 dark:border-cyan-500/40 p-6 h-full flex flex-col justify-center">
-                  <div className="flex items-center gap-3 mb-4">
-                    <div className="w-12 h-12 rounded-full bg-cyan-200/70 dark:bg-cyan-500/20 border border-cyan-400/50 dark:border-cyan-400/50 flex items-center justify-center">
-                      <Layers className="w-6 h-6 text-cyan-700 dark:text-cyan-400" />
-                    </div>
-                    <div>
-                      <p className="text-xs text-cyan-700 dark:text-cyan-300 uppercase tracking-wider">Layering</p>
-                      <p className="text-lg font-bold text-gray-800 dark:text-white">
-                        {scannedProduct.layeringOrder === 0 ? "Not Recommended" : `Step ${scannedProduct.layeringOrder}`}
-                      </p>
-                    </div>
-                  </div>
-                  <p className="text-sm text-cyan-700 dark:text-cyan-300">Position in your skincare routine</p>
-                </GlassCard>
-              </motion.div>
-            </div>
+                  {/* Scanning line */}
+                  <motion.div
+                    className="absolute left-1/2 top-2 h-1 w-40 -translate-x-1/2 rounded-full bg-gradient-to-r from-transparent via-white/80 to-transparent"
+                    animate={{ y: [0, 300, 0], opacity: [0.2, 0.9, 0.2] }}
+                    transition={{ duration: 3, repeat: Infinity, ease: "easeInOut" }}
+                  />
 
-            {/* Full Ingredients Analysis */}
-            <motion.div
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ duration: 0.6, delay: 0.5 }}
-              className="mb-8"
-            >
-              <GlassCard className="bg-white/70 dark:bg-slate-900/60 border border-orange-200/40 dark:border-orange-700/30 p-6">
-                <h3 className="text-xl font-bold text-gray-800 dark:text-white mb-6">Full Ingredient Breakdown</h3>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  {scannedProduct.ingredients.map((ingredient, index) => (
-                    <motion.div
-                      key={index}
-                      initial={{ opacity: 0, x: -10 }}
-                      animate={{ opacity: 1, x: 0 }}
-                      transition={{ duration: 0.5, delay: 0.5 + (index * 0.08) }}
-                      className={`p-4 rounded-lg border ${
-                        ingredient.status === "beneficial"
-                          ? "bg-green-100/70 dark:bg-green-500/10 border-green-300 dark:border-green-400/40"
-                          : ingredient.status === "neutral"
-                            ? "bg-blue-100/70 dark:bg-blue-500/10 border-blue-300 dark:border-blue-400/40"
-                            : "bg-red-100/70 dark:bg-red-500/10 border-red-300 dark:border-red-400/40"
-                      }`}
-                    >
-                      <div className="flex items-start justify-between gap-3 mb-2">
-                        <p className={`font-semibold ${
-                          ingredient.status === "beneficial"
-                            ? "text-green-700 dark:text-green-300"
-                            : ingredient.status === "neutral"
-                              ? "text-blue-700 dark:text-blue-300"
-                              : "text-red-700 dark:text-red-300"
-                        }`}>
-                          {ingredient.name}
-                        </p>
-                        <span className={`px-2 py-1 rounded text-xs font-medium capitalize ${
-                          ingredient.status === "beneficial"
-                            ? "bg-green-200 dark:bg-green-500/30 text-green-800 dark:text-green-200"
-                            : ingredient.status === "neutral"
-                              ? "bg-blue-200 dark:bg-blue-500/30 text-blue-800 dark:text-blue-200"
-                              : "bg-red-200 dark:bg-red-500/30 text-red-800 dark:text-red-200"
-                        }`}>
-                          {ingredient.status}
-                        </span>
-                      </div>
-                      <p className="text-sm text-gray-700 dark:text-gray-300">{ingredient.description}</p>
-                    </motion.div>
+                  {/* Corner markers */}
+                  {[
+                    "-left-2 top-8",
+                    "-left-2 bottom-8",
+                    "-right-2 top-8",
+                    "-right-2 bottom-8",
+                  ].map((position) => (
+                    <motion.span
+                      key={position}
+                      className={`absolute ${position} h-2 w-2 rounded-full bg-white/95 shadow-[0_0_16px_rgba(255,255,255,0.9)]`}
+                      animate={{ scale: [1, 1.3, 1], opacity: [0.6, 1, 0.6] }}
+                      transition={{ duration: 2, repeat: Infinity, ease: "easeInOut" }}
+                    />
                   ))}
                 </div>
-              </GlassCard>
-            </motion.div>
+              </div>
 
-            {/* Conflicts Warning */}
-            {scannedProduct.conflictsWith.length > 0 && (
+              {/* Close button */}
+              <motion.button
+                onClick={() => setShowCamera(false)}
+                className="absolute top-4 right-4 w-11 h-11 rounded-full bg-black/50 hover:bg-black/70 text-white border border-white/30 flex items-center justify-center transition-all backdrop-blur-md"
+                whileHover={{ scale: 1.1 }}
+                whileTap={{ scale: 0.95 }}
+                aria-label="Close camera"
+              >
+                <X size={20} />
+              </motion.button>
+
+              {/* Action buttons */}
               <motion.div
-                initial={{ opacity: 0, y: 20 }}
+                className="flex flex-col sm:flex-row gap-4 mt-6 justify-center"
+                initial={{ opacity: 0, y: 10 }}
                 animate={{ opacity: 1, y: 0 }}
-                transition={{ duration: 0.6, delay: 0.6 }}
-                className="mb-8"
+                transition={{ delay: 0.2 }}
               >
-                <GlassCard className="bg-red-100/70 dark:bg-red-900/30 border border-red-300/60 dark:border-red-500/40 p-6">
-                  <h3 className="text-lg font-bold text-red-800 dark:text-red-300 mb-4 flex items-center gap-2">
-                    <AlertTriangle className="w-5 h-5" />
-                    Product Conflicts
-                  </h3>
-                  <p className="text-red-700 dark:text-red-200 text-sm mb-4">Do not use this product with:</p>
-                  <div className="flex flex-wrap gap-2">
-                    {scannedProduct.conflictsWith.map((conflict, index) => (
-                      <motion.span
-                        key={index}
-                        initial={{ opacity: 0, scale: 0.8 }}
-                        animate={{ opacity: 1, scale: 1 }}
-                        transition={{ duration: 0.3, delay: 0.6 + (index * 0.1) }}
-                        className="px-3 py-2 rounded-lg bg-red-200/70 dark:bg-red-500/20 border border-red-300 dark:border-red-400/40 text-red-700 dark:text-red-200 text-sm font-medium"
-                      >
-                        {conflict}
-                      </motion.span>
-                    ))}
-                  </div>
-                </GlassCard>
+                <Button
+                  onClick={capturePhoto}
+                  className="sm:w-auto px-8 h-12 bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-600 hover:to-teal-600"
+                  glow
+                >
+                  📷 Capture Photo
+                </Button>
+                <Button
+                  onClick={() => setShowCamera(false)}
+                  variant="secondary"
+                  className="sm:w-auto px-8 h-12"
+                >
+                  Cancel
+                </Button>
               </motion.div>
-            )}
-
-            {/* Usage Recommendations */}
-            <motion.div
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ duration: 0.6, delay: 0.65 }}
-              className="mb-12"
-            >
-              <GlassCard className="bg-white/70 dark:bg-slate-900/60 border border-orange-200/40 dark:border-orange-700/30 p-6">
-                <h3 className="text-xl font-bold text-gray-800 dark:text-white mb-6 flex items-center gap-2">
-                  <Clock className="w-5 h-5 text-orange-500" />
-                  Usage Recommendations
-                </h3>
-                <div className="space-y-3">
-                  {scannedProduct.recommendations.map((rec, index) => (
-                    <motion.div
-                      key={index}
-                      initial={{ opacity: 0, x: -10 }}
-                      animate={{ opacity: 1, x: 0 }}
-                      transition={{ duration: 0.5, delay: 0.65 + (index * 0.1) }}
-                      className="flex gap-4 items-start"
-                    >
-                      <div className="flex-shrink-0 w-8 h-8 rounded-full bg-gradient-to-br from-orange-500 to-pink-500 flex items-center justify-center text-white font-bold text-sm mt-0.5">
-                        {index + 1}
-                      </div>
-                      <p className="text-gray-700 dark:text-gray-300 flex-1 pt-1">{rec}</p>
-                    </motion.div>
-                  ))}
-                </div>
-              </GlassCard>
-            </motion.div>
-
-            {/* Action Buttons */}
-            <motion.div
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ duration: 0.6, delay: 0.7 }}
-              className="flex flex-col sm:flex-row gap-4 max-w-2xl mx-auto"
-            >
-              <motion.button
-                onClick={() => setScannedProduct(null)}
-                whileHover={{ scale: 1.05 }}
-                whileTap={{ scale: 0.95 }}
-                className="flex-1 bg-gradient-to-r from-orange-500 to-pink-500 text-white py-4 rounded-xl font-semibold shadow-lg shadow-orange-500/30 hover:shadow-orange-500/50 transition-all"
-              >
-                Scan Another Product
-              </motion.button>
-              <motion.button
-                onClick={() => navigate("/routine")}
-                whileHover={{ scale: 1.05 }}
-                whileTap={{ scale: 0.95 }}
-                className="flex-1 px-6 py-4 rounded-xl border-2 border-orange-400/60 dark:border-orange-500/60 text-orange-700 dark:text-orange-300 font-semibold hover:bg-orange-500/10 transition-all"
-              >
-                View My Routine
-              </motion.button>
             </motion.div>
           </motion.div>
         )}
+
       </div>
-    </div>
+    </PageTransition>
   );
 }
+

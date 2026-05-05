@@ -1,5 +1,6 @@
 import { createContext, useContext, useState, ReactNode, useEffect } from "react";
 import { useAuth } from "./AuthContext";
+import { http } from "../api/http";
 
 export interface CartItem {
   id: string;
@@ -29,20 +30,12 @@ export function CartProvider({ children }: { children: ReactNode }) {
   const { isAuthenticated, token } = useAuth();
 
   const fetchCart = async () => {
-    if (!isAuthenticated || !token) return;
+    if (!isAuthenticated) return;
 
     try {
       setLoading(true);
-      const response = await fetch(`${import.meta.env.VITE_API_URL}/cart`, {
-        headers: {
-          "Authorization": `Bearer ${token}`,
-        },
-      });
-
-      if (response.ok) {
-        const cart = await response.json();
-        setCartItems(cart.items || []);
-      }
+      const response = await http.get("/cart");
+      setCartItems(response.data?.items || []);
     } catch (error) {
       console.error("Failed to fetch cart:", error);
     } finally {
@@ -67,23 +60,8 @@ export function CartProvider({ children }: { children: ReactNode }) {
     console.log("Adding item to cart:", requestData);
 
     try {
-      const response = await fetch(`${import.meta.env.VITE_API_URL}/cart/add`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${token}`,
-        },
-        body: JSON.stringify(requestData),
-      });
-
-      console.log("Cart add response:", response.status, response.statusText);
-
-      if (response.ok) {
-        await fetchCart(); // Refresh cart after adding
-      } else {
-        const errorText = await response.text();
-        console.error("Cart add failed:", errorText);
-      }
+      await http.post("/cart/add", requestData);
+      await fetchCart(); // Refresh cart after adding
     } catch (error) {
       console.error("Failed to add item to cart:", error);
     }
@@ -93,18 +71,8 @@ export function CartProvider({ children }: { children: ReactNode }) {
     if (!isAuthenticated || !token) return;
 
     try {
-      const response = await fetch(`${import.meta.env.VITE_API_URL}/cart/item/${id}`, {
-        method: "PUT",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${token}`,
-        },
-        body: JSON.stringify({ quantity }),
-      });
-
-      if (response.ok) {
-        await fetchCart(); // Refresh cart after updating
-      }
+      await http.put(`/cart/item/${id}`, { quantity });
+      await fetchCart(); // Refresh cart after updating
     } catch (error) {
       console.error("Failed to update quantity:", error);
     }
@@ -114,16 +82,8 @@ export function CartProvider({ children }: { children: ReactNode }) {
     if (!isAuthenticated || !token) return;
 
     try {
-      const response = await fetch(`${import.meta.env.VITE_API_URL}/cart/item/${id}`, {
-        method: "DELETE",
-        headers: {
-          "Authorization": `Bearer ${token}`,
-        },
-      });
-
-      if (response.ok) {
-        await fetchCart(); // Refresh cart after removing
-      }
+      await http.delete(`/cart/item/${id}`);
+      await fetchCart(); // Refresh cart after removing
     } catch (error) {
       console.error("Failed to remove item:", error);
     }

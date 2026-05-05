@@ -1,550 +1,630 @@
-import { useEffect, useMemo, useState } from 'react';
-import { Trophy, Award, Flame, Star, Gift, Sparkles, TrendingUp, Lock, Check, Zap } from 'lucide-react';
-import { useAuth } from '../contexts/AuthContext';
-import { useFeatureAccess } from '../../hooks/useFeatureAccess';
-import { PremiumFeatureLock } from '../components/PremiumFeatureLock';
-import {
-  rewardsService,
-  type RewardsBadge,
-  type RewardsPageData,
-} from '../api/rewards.service';
+import { useState, ChangeEvent, useRef, useEffect, useMemo } from "react";
+import { useNavigate } from "react-router-dom";
+import Webcam from "react-webcam";
 
-const DEFAULT_USER_STATS: RewardsPageData['userStats'] = {
-  currentStreak: 0,
-  longestStreak: 0,
-  totalPoints: 0,
-  level: 1,
-  pointsToNextLevel: 600,
-  routinesCompleted: 0,
-  productsScanned: 0,
-  articlesRead: 0,
-};
 
-const getRarityColor = (rarity: RewardsBadge['rarity']) => {
-  switch (rarity) {
-    case 'common':
-      return 'from-gray-400 to-gray-500';
-    case 'rare':
-      return 'from-[#6ba5d6] to-[#3ec3b4]';
-    case 'epic':
-      return 'from-[#cc5f57] to-[#f2b8a0]';
-    case 'legendary':
-      return 'from-[#e0a325] to-[#ff8a7a]';
-    default:
-      return 'from-gray-400 to-gray-500';
-  }
-};
+import { Button } from "../components/Button";
+import { GlassCard } from "../components/GlassCard";
+import { ProgressIndicator } from "../components/ProgressIndicator";
+import { PageTransition } from "../components/PageTransition";
+import { ScannerCore } from "../components/ScannerCore";
+import { ScannerActions } from "../components/ScannerActions";
 
-const getRarityBorder = (rarity: RewardsBadge['rarity']) => {
-  switch (rarity) {
-    case 'common':
-      return 'border-gray-300';
-    case 'rare':
-      return 'border-[#6ba5d6]';
-    case 'epic':
-      return 'border-[#cc5f57]';
-    case 'legendary':
-      return 'border-[#e0a325] shadow-[#f2d8a5]';
-    default:
-      return 'border-gray-300';
-  }
-};
+import { motion, AnimatePresence } from "motion/react";
+import { Upload, AlertCircle, X, Crown, Camera, Info } from "lucide-react";
+import { useAuth } from "../contexts/AuthContext";
+import { http } from "../api/http";
+import { usePhotoLimit } from "../../hooks/useFeatureAccess";
+import { toast } from "sonner";
 
-const formatDate = (value: string | null) => {
-  if (!value) return 'Recently unlocked';
+const cameraCrystal = new URL("../../assets/hd_restoration_result_image.png", import.meta.url).href;
 
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return 'Recently unlocked';
+export function UploadPage() {
+  const navigate = useNavigate();
+  const { token, isAuthenticated, isInitialized, login, refreshNow } = useAuth();
+  const { maxPhotos } = usePhotoLimit();
 
-  return date.toLocaleDateString(undefined, {
-    month: 'short',
-    day: 'numeric',
-    year: 'numeric',
-  });
-};
+  const [uploading, setUploading] = useState(false);
+  const [files, setFiles] = useState<File[]>([]);
+  const [showCamera, setShowCamera] = useState(false);
+  const [isCentered, setIsCentered] = useState(false);
+  const isLimitReached = files.length >= maxPhotos;
 
-export default function RewardsPage() {
-  const { token } = useAuth();
-  const { hasAccess, tierName, requiredTierName } = useFeatureAccess("rewards");
-  const [activeTab, setActiveTab] = useState<'overview' | 'badges' | 'rewards'>('overview');
-  const [pageData, setPageData] = useState<RewardsPageData | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
-  const [claimingRewardId, setClaimingRewardId] = useState<string | null>(null);
+  const webcamRef = useRef<Webcam | null>(null);
 
-  const userStats = pageData?.userStats ?? DEFAULT_USER_STATS;
-  const badges = pageData?.badges ?? [];
-  const rewards = pageData?.rewards ?? [];
+  // 🔊 SOUND FIX (UNLOCK AFTER USER CLICK)
+  const audioRef = useRef<HTMLAudioElement | null>(null);
 
-  const unlockedBadges = useMemo(
-    () => badges.filter((badge) => badge.unlocked),
-    [badges],
+  const initSound = () => {
+    if (!audioRef.current) {
+      audioRef.current = new Audio("/beep.mp3");
+
+      // unlock audio (browser requirement)
+      audioRef.current
+        .play()
+        .then(() => {
+          audioRef.current?.pause();
+          if (audioRef.current) audioRef.current.currentTime = 0;
+        })
+        .catch(() => {});
+    }
+  };
+
+  const playSound = () => {
+    if (audioRef.current) {
+      audioRef.current.currentTime = 0;
+      audioRef.current.play().catch(() => {});
+    }
+  };
+
+  const previewUrls = useMemo(
+    () => files.map((file) => URL.createObjectURL(file)),
+    [files],
   );
 
-  const levelProgress = userStats.level >= 10
-    ? 100
-    : Math.max(0, Math.min(100, ((600 - userStats.pointsToNextLevel) / 600) * 100));
+  useEffect(() => {
+    return () => {
+      previewUrls.forEach((url) => URL.revokeObjectURL(url));
+    };
+  }, [previewUrls]);
 
-  const daysUntilNextBadge = Math.max(0, 7 - (userStats.currentStreak % 7 || 7));
+  // 📂 Upload
+  const handleFileChange = (e: ChangeEvent<HTMLInputElement>) => {
+    if (!e.target.files) return;
 
-  const loadRewards = async () => {
-    if (!token) {
-      setLoading(false);
+    const incomingFiles = Array.from(e.target.files);
+    const newFiles = incomingFiles.filter((file) => file.type.startsWith("image/"));
+    const remainingSlots = maxPhotos - files.length;
+
+    if (newFiles.length !== incomingFiles.length) {
+      toast.error("Only image files are allowed");
+    }
+
+    if (remainingSlots === 0) {
+      toast.error(`Max ${maxPhotos} images reached`);
       return;
     }
 
-    setLoading(true);
-    setError('');
-
-    try {
-      const data = await rewardsService.getRewardsPageData();
-      setPageData(data);
-    } catch (err: any) {
-      console.error('Failed to load rewards data:', err);
-      setError(err?.response?.data?.message || err?.message || 'Failed to load rewards data');
-    } finally {
-      setLoading(false);
-    }
+    setFiles((prev) => [...prev, ...newFiles.slice(0, remainingSlots)]);
   };
 
+  // ❌ remove
+  const removeFile = (index: number) => {
+    setFiles((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  // 📸 capture
+  const capturePhoto = () => {
+    if (files.length >= maxPhotos) {
+      toast.error(`Max ${maxPhotos} images reached`);
+      return;
+    }
+
+    if (!webcamRef.current) return;
+
+    const imageSrc = webcamRef.current.getScreenshot();
+    if (!imageSrc) return;
+
+    const byteString = atob(imageSrc.split(",")[1]);
+    const mimeString = imageSrc.split(",")[0].split(":")[1].split(";")[0];
+
+    const ab = new ArrayBuffer(byteString.length);
+    const ia = new Uint8Array(ab);
+
+    for (let i = 0; i < byteString.length; i++) {
+      ia[i] = byteString.charCodeAt(i);
+    }
+
+    const file = new File([ab], "camera.jpg", { type: mimeString });
+
+    setFiles((prev) => [...prev, file].slice(0, maxPhotos));
+    setShowCamera(false);
+  };
+
+  // 🎯 simple center effect (visual only)
   useEffect(() => {
-    let isMounted = true;
+    if (!showCamera) return;
 
-    const run = async () => {
-      if (!token) {
-        if (isMounted) {
-          setLoading(false);
-        }
-        return;
+    const interval = setInterval(() => {
+      const centered = Math.random() > 0.5;
+
+      setIsCentered(centered);
+
+      if (centered) {
+        playSound();
       }
+    }, 2000);
 
-      if (isMounted) {
-        setLoading(true);
-        setError('');
-      }
+    return () => clearInterval(interval);
+  }, [showCamera]);
 
-      try {
-        const data = await rewardsService.getRewardsPageData();
+  // 🚀 analyze
+  const handleAnalyze = async () => {
+    if (!files.length) return toast.error("Upload at least one photo");
 
-        if (isMounted) {
-          setPageData(data);
-        }
-      } catch (err: any) {
-        console.error('Failed to load rewards data:', err);
-
-        if (isMounted) {
-          setError(err?.response?.data?.message || err?.message || 'Failed to load rewards data');
-        }
-      } finally {
-        if (isMounted) {
-          setLoading(false);
-        }
-      }
-    };
-
-    if (token) {
-      run();
-    } else {
-      setLoading(false);
+    if (!isInitialized) return toast.error("Auth initializing...");
+    if (!isAuthenticated) {
+      login("/upload");
+      return;
     }
 
-    return () => {
-      isMounted = false;
-    };
-  }, [token, hasAccess]);
+    setUploading(true);
 
-  const claimReward = async (rewardId: string) => {
-    setClaimingRewardId(rewardId);
+    const formData = new FormData();
+    formData.append("image", files[0]);
 
     try {
-      await rewardsService.claimReward(rewardId);
-      await loadRewards();
+      await refreshNow();
+
+      const API = (import.meta.env.VITE_API_URL as string) || "http://localhost:3000";
+      const res = await fetch(`${API}/ai/analyze`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+        body: formData,
+      });
+
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.message || "Error");
+
+      localStorage.setItem("skinAnalysisResult", JSON.stringify(data));
+      navigate("/results");
     } catch (err: any) {
-      console.error('Failed to claim reward:', err);
-      setError(err?.response?.data?.message || err?.message || 'Failed to claim reward');
+      toast.error(err.message);
     } finally {
-      setClaimingRewardId(null);
+      setUploading(false);
     }
   };
-
-  // Check if user has access to this feature
-  if (token && !hasAccess) {
-    return (
-      <PremiumFeatureLock
-        featureName="Rewards Program"
-        description="Earn points and badges by completing daily routines, scanning products, and reading articles. Redeem rewards for exclusive discounts and products."
-        currentPlan={tierName}
-        requiredPlan={requiredTierName}
-      />
-    );
-  }
-
-  if (loading) {
-    return (
-      <div className="min-h-screen bg-gradient-to-br from-[#fdf8f3] via-[#fff7ef] to-[#ffece2] pt-24 pb-16 px-4 deepskyn-atmosphere">
-        <div className="mx-auto max-w-6xl">
-          <div className="rounded-3xl border border-white/60 bg-white/80 p-10 text-center shadow-xl backdrop-blur-lg">
-            <div className="mx-auto mb-4 h-14 w-14 animate-spin rounded-full border-4 border-[#ff8a7a] border-t-transparent" />
-            <h2 className="text-2xl font-bold text-gray-900">Loading your rewards</h2>
-            <p className="mt-2 text-gray-600">Fetching your live points, badges, and rewards catalog.</p>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  if (error && !pageData) {
-    return (
-      <div className="min-h-screen bg-gradient-to-br from-[#fdf8f3] via-[#fff7ef] to-[#ffece2] pt-24 pb-16 px-4 deepskyn-atmosphere">
-        <div className="mx-auto max-w-6xl">
-          <div className="rounded-3xl border border-red-200 bg-white/85 p-10 text-center shadow-xl backdrop-blur-lg">
-            <h2 className="text-2xl font-bold text-gray-900">Rewards unavailable</h2>
-            <p className="mt-2 text-gray-600">{error}</p>
-            <button
-              type="button"
-              onClick={loadRewards}
-              className="mt-6 rounded-xl bg-gradient-to-r from-[#ff8a7a] to-[#f2b8a0] px-6 py-3 font-semibold text-white shadow-lg transition-all hover:shadow-xl"
-            >
-              Retry
-            </button>
-          </div>
-        </div>
-      </div>
-    );
-  }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-[#fdf8f3] via-[#fff7ef] to-[#ffece2] pt-24 pb-16 px-4 deepskyn-atmosphere">
-      <div className="max-w-6xl mx-auto">
-        {/* Header */}
-        <div className="text-center mb-12">
-          <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-gradient-to-br from-[#ff8a7a] to-[#f2b8a0] mb-4 shadow-lg">
-            <Trophy className="w-8 h-8 text-white" />
-          </div>
-          <h1 className="text-4xl font-bold text-gray-900 mb-3">
-            Rewards & Achievements
-          </h1>
-          <p className="text-lg text-gray-600 max-w-2xl mx-auto">
-            Stay consistent, earn rewards, and unlock exclusive benefits on your skincare journey.
-          </p>
+    <PageTransition direction="left">
+      <div className="relative isolate min-h-screen overflow-hidden bg-[#f4edf9] dark:bg-[#1a0f2e] flex items-center justify-center p-4 pt-24 sm:p-6 sm:pt-20">
+        {/* AI BACKGROUND LAYERS */}
+        <div className="pointer-events-none absolute inset-0 z-0">
+          <motion.img
+            src={cameraCrystal}
+            alt=""
+            aria-hidden="true"
+            className="absolute right-[6%] top-[14%] w-[280px] sm:w-[340px] opacity-[0.28] blur-[0.4px]"
+            style={{ filter: "drop-shadow(0 20px 42px rgba(165,103,255,0.28))" }}
+            animate={{ y: [0, -22, 0], x: [0, -16, 0], rotate: [0, 1.8, 0] }}
+            transition={{ duration: 10, repeat: Infinity, ease: "easeInOut" }}
+          />
+
+          <motion.img
+            src={cameraCrystal}
+            alt=""
+            aria-hidden="true"
+            className="absolute left-[5%] bottom-[8%] w-[190px] sm:w-[240px] opacity-[0.18] scale-x-[-1]"
+            style={{ filter: "drop-shadow(0 14px 36px rgba(165,103,255,0.2))" }}
+            animate={{ y: [0, 16, 0], x: [0, 12, 0], rotate: [0, -1.6, 0] }}
+            transition={{ duration: 12, repeat: Infinity, ease: "easeInOut" }}
+          />
+
+          <div
+            className="absolute inset-0"
+            style={{
+              background:
+                "radial-gradient(1200px 620px at 10% 10%, rgba(249,188,218,0.48), transparent 60%), radial-gradient(980px 560px at 90% 15%, rgba(196,145,255,0.42), transparent 58%), radial-gradient(820px 500px at 50% 92%, rgba(255,201,174,0.36), transparent 58%)",
+            }}
+          />
+
+          <motion.div
+            className="absolute -top-28 -left-24 h-[420px] w-[420px] rounded-full bg-[radial-gradient(circle_at_center,rgba(252,197,223,0.62),rgba(252,197,223,0)_70%)] blur-3xl"
+            animate={{ x: [0, 52, 0], y: [0, 30, 0] }}
+            transition={{ duration: 18, repeat: Infinity, ease: "easeInOut" }}
+          />
+          <motion.div
+            className="absolute top-[22%] -right-28 h-[440px] w-[440px] rounded-full bg-[radial-gradient(circle_at_center,rgba(205,171,255,0.52),rgba(205,171,255,0)_70%)] blur-3xl"
+            animate={{ x: [0, -42, 0], y: [0, -26, 0] }}
+            transition={{ duration: 20, repeat: Infinity, ease: "easeInOut" }}
+          />
+          <motion.div
+            className="absolute -bottom-32 left-[24%] h-[420px] w-[420px] rounded-full bg-[radial-gradient(circle_at_center,rgba(255,199,173,0.48),rgba(255,199,173,0)_72%)] blur-3xl"
+            animate={{ x: [0, 36, 0], y: [0, -32, 0] }}
+            transition={{ duration: 22, repeat: Infinity, ease: "easeInOut" }}
+          />
+
+          <motion.div
+            className="absolute -left-[35%] top-[-20%] h-[180%] w-[55%] rotate-[16deg] opacity-[0.3]"
+            style={{
+              background:
+                "linear-gradient(180deg, rgba(255,255,255,0), rgba(247,189,220,0.94), rgba(196,145,255,0.7), rgba(255,255,255,0))",
+              filter: "blur(42px)",
+            }}
+            animate={{ x: ["0%", "280%"] }}
+            transition={{ duration: 10, repeat: Infinity, ease: "linear" }}
+          />
+
+          {/* Floating AI particles */}
+          <motion.div
+            className="absolute left-[5%] top-[18%] h-36 w-36 rounded-full bg-[radial-gradient(circle_at_30%_30%,rgba(255,218,236,0.98),rgba(255,218,236,0))] blur-2xl"
+            animate={{ x: [0, 78, 0], y: [0, -52, 0], scale: [1, 1.08, 1] }}
+            transition={{ duration: 11, repeat: Infinity, ease: "easeInOut" }}
+          />
+          <motion.div
+            className="absolute right-[7%] top-[30%] h-32 w-32 rounded-full bg-[radial-gradient(circle_at_40%_35%,rgba(210,183,255,0.94),rgba(210,183,255,0))] blur-2xl"
+            animate={{ x: [0, -64, 0], y: [0, 42, 0], scale: [1, 1.1, 1] }}
+            transition={{ duration: 12, repeat: Infinity, ease: "easeInOut" }}
+          />
+          <motion.div
+            className="absolute left-[16%] bottom-[11%] h-28 w-28 rounded-full bg-[radial-gradient(circle_at_center,rgba(255,218,193,0.92),rgba(255,218,193,0))] blur-xl"
+            animate={{ x: [0, 54, 0], y: [0, -34, 0], scale: [1, 1.08, 1] }}
+            transition={{ duration: 10, repeat: Infinity, ease: "easeInOut" }}
+          />
+          <motion.div
+            className="absolute right-[14%] bottom-[16%] h-40 w-40 rounded-full bg-[radial-gradient(circle_at_center,rgba(233,198,255,0.84),rgba(233,198,255,0))] blur-2xl"
+            animate={{ x: [0, -58, 0], y: [0, -40, 0], scale: [1, 1.08, 1] }}
+            transition={{ duration: 14, repeat: Infinity, ease: "easeInOut" }}
+          />
+          {["left-[10%] top-[12%]", "left-[84%] top-[16%]", "left-[78%] top-[72%]", "left-[20%] top-[70%]", "left-[64%] top-[26%]", "left-[35%] top-[82%]"]
+            .map((position, index) => (
+              <motion.span
+                key={position}
+                className={`absolute ${position} h-2.5 w-2.5 rounded-full bg-white/80 shadow-[0_0_18px_rgba(245,183,220,0.72)]`}
+                animate={{ y: [0, -24, 0], x: [0, 8, 0], opacity: [0.4, 1, 0.4] }}
+                transition={{ duration: 4 + index * 0.5, repeat: Infinity, ease: "easeInOut" }}
+              />
+            ))}
+
+          <div
+            className="absolute inset-0 opacity-[0.1] dark:opacity-[0.14]"
+            style={{
+              backgroundImage:
+                "linear-gradient(rgba(139,99,211,0.22) 1px, transparent 1px), linear-gradient(90deg, rgba(139,99,211,0.18) 1px, transparent 1px)",
+              backgroundSize: "52px 52px",
+            }}
+          />
+
+          <div
+            className="absolute inset-0 opacity-[0.12] dark:opacity-[0.16]"
+            style={{
+              backgroundImage:
+                "radial-gradient(circle at center, rgba(139,99,211,0.35) 1px, transparent 1.2px)",
+              backgroundSize: "30px 30px",
+            }}
+          />
+
+          <motion.div
+            className="absolute inset-0 opacity-[0.14] dark:opacity-[0.2]"
+            style={{
+              backgroundImage:
+                "repeating-linear-gradient(180deg, rgba(139,99,211,0.3) 0px, rgba(139,99,211,0.3) 1px, transparent 1px, transparent 10px)",
+            }}
+            animate={{ y: [0, 34, 0] }}
+            transition={{ duration: 9, repeat: Infinity, ease: "linear" }}
+          />
         </div>
 
-        {error && pageData && (
-          <div className="mb-6 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900 shadow-sm">
-            {error}
-          </div>
-        )}
-
-        {/* Tab Navigation */}
-        <div className="flex gap-3 mb-8">
-          <button
-            onClick={() => setActiveTab('overview')}
-            className={`flex-1 py-4 rounded-xl font-semibold transition-all ${
-              activeTab === 'overview'
-                ? 'bg-gradient-to-r from-[#ff8a7a] to-[#f2b8a0] text-white shadow-lg'
-                : 'bg-white/70 text-gray-700 hover:bg-white/90 border border-white/50'
-            }`}
+        <div className="relative z-10 w-full max-w-6xl">
+          {/* Progress bar */}
+          <motion.div
+            initial={{ opacity: 0, y: -20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.6 }}
+            className="mb-12"
           >
-            Overview
-          </button>
-          <button
-            onClick={() => setActiveTab('badges')}
-            className={`flex-1 py-4 rounded-xl font-semibold transition-all ${
-              activeTab === 'badges'
-                ? 'bg-gradient-to-r from-[#ff8a7a] to-[#f2b8a0] text-white shadow-lg'
-                : 'bg-white/70 text-gray-700 hover:bg-white/90 border border-white/50'
-            }`}
-          >
-            Badges
-          </button>
-          <button
-            onClick={() => setActiveTab('rewards')}
-            className={`flex-1 py-4 rounded-xl font-semibold transition-all ${
-              activeTab === 'rewards'
-                ? 'bg-gradient-to-r from-[#ff8a7a] to-[#f2b8a0] text-white shadow-lg'
-                : 'bg-white/70 text-gray-700 hover:bg-white/90 border border-white/50'
-            }`}
-          >
-            Rewards Shop
-          </button>
-        </div>
+            <ProgressIndicator currentStep={3} totalSteps={4} />
+          </motion.div>
 
-        {/* Overview Tab */}
-        {activeTab === 'overview' && (
-          <div className="space-y-6">
-            {/* Stats Grid */}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-              {/* Current Streak */}
-              <div className="backdrop-blur-lg bg-gradient-to-br from-[#ffd9c5]/60 to-[#ffb7a0]/60 rounded-3xl p-6 border border-[#f2b8a0]/70 shadow-xl">
-                <div className="flex items-start justify-between mb-4">
-                  <div>
-                    <p className="text-sm font-medium text-gray-700 mb-1">Current Streak</p>
-                    <div className="flex items-baseline gap-2">
-                      <span className="text-5xl font-bold text-gray-900">{userStats.currentStreak}</span>
-                      <span className="text-xl font-semibold text-gray-600">days</span>
-                    </div>
-                  </div>
-                  <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-orange-400 to-red-500 flex items-center justify-center shadow-lg">
-                    <Flame className="w-8 h-8 text-white" />
-                  </div>
-                </div>
-                <p className="text-sm text-gray-600">
-                  Keep it up! {daysUntilNextBadge} more day{daysUntilNextBadge === 1 ? '' : 's'} for the next badge.
-                </p>
-              </div>
-
-              {/* Total Points */}
-              <div className="backdrop-blur-lg bg-gradient-to-br from-[#ffe7d3]/70 to-[#ffd6cf]/70 rounded-3xl p-6 border border-[#f2b8a0]/70 shadow-xl">
-                <div className="flex items-start justify-between mb-4">
-                  <div>
-                    <p className="text-sm font-medium text-gray-700 mb-1">Total Points</p>
-                    <div className="flex items-baseline gap-2">
-                      <span className="text-5xl font-bold text-gray-900">{userStats.totalPoints.toLocaleString()}</span>
-                      <span className="text-xl font-semibold text-gray-600">pts</span>
-                    </div>
-                  </div>
-                  <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-[#ff8a7a] to-[#f2b8a0] flex items-center justify-center shadow-lg">
-                    <Star className="w-8 h-8 text-white fill-white" />
-                  </div>
-                </div>
-                <p className="text-sm text-gray-600">{userStats.pointsToNextLevel} points to Level {userStats.level + 1}</p>
-              </div>
-
-              {/* Level */}
-              <div className="backdrop-blur-lg bg-gradient-to-br from-emerald-500/20 to-green-500/20 rounded-3xl p-6 border border-emerald-500/30 shadow-xl">
-                <div className="flex items-start justify-between mb-4">
-                  <div>
-                    <p className="text-sm font-medium text-gray-700 mb-1">Current Level</p>
-                    <div className="flex items-baseline gap-2">
-                      <span className="text-5xl font-bold text-gray-900">{userStats.level}</span>
-                      <span className="text-xl font-semibold text-gray-600">/ 10</span>
-                    </div>
-                  </div>
-                  <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-emerald-400 to-green-500 flex items-center justify-center shadow-lg">
-                    <TrendingUp className="w-8 h-8 text-white" />
-                  </div>
-                </div>
-                <div className="w-full bg-gray-200 rounded-full h-2">
-                  <div 
-                    className="bg-gradient-to-r from-emerald-400 to-green-500 h-2 rounded-full transition-all duration-500"
-                    style={{ width: `${levelProgress}%` }}
-                  />
-                </div>
-              </div>
-            </div>
-
-            {/* Activity Stats */}
-            <div className="backdrop-blur-lg bg-white/80 rounded-3xl shadow-xl p-8 border border-white/50">
-              <h2 className="text-2xl font-bold text-gray-900 mb-6 flex items-center gap-2">
-                <Zap className="w-6 h-6 text-[#cc5f57]" />
-                Your Activity
+          {/* Main scanner interface */}
+          <div className="flex flex-col items-center gap-12">
+            {/* Header */}
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.6, delay: 0.1 }}
+              className="text-center space-y-3"
+            >
+              <h2 className="text-3xl md:text-4xl font-semibold text-gray-800 dark:text-white">
+                AI Skin Scanner
               </h2>
-              <div className="grid grid-cols-3 gap-8">
-                <div className="text-center">
-                  <div className="text-4xl font-bold text-[#cc5f57] mb-2">
-                    {userStats.routinesCompleted}
-                  </div>
-                  <div className="text-sm text-gray-600">Routines Completed</div>
-                </div>
-                <div className="text-center">
-                  <div className="text-4xl font-bold text-[#cc5f57] mb-2">
-                    {userStats.productsScanned}
-                  </div>
-                  <div className="text-sm text-gray-600">Products Scanned</div>
-                </div>
-                <div className="text-center">
-                  <div className="text-4xl font-bold text-[#cc5f57] mb-2">
-                    {userStats.articlesRead}
-                  </div>
-                  <div className="text-sm text-gray-600">Articles Read</div>
-                </div>
-              </div>
-            </div>
+              <p className="text-gray-500 text-sm md:text-base max-w-xl mx-auto">
+                Upload up to {maxPhotos} clear photos for advanced AI analysis
+              </p>
 
-            {/* Recent Badges */}
-            <div className="backdrop-blur-lg bg-white/80 rounded-3xl shadow-xl p-8 border border-white/50">
-              <h2 className="text-2xl font-bold text-gray-900 mb-6 flex items-center gap-2">
-                <Award className="w-6 h-6 text-[#8b63d3]" />
-                Recently Unlocked
-              </h2>
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                {unlockedBadges.slice(0, 4).map((badge) => (
-                  <div
-                    key={badge.id}
-                    className={`p-6 rounded-2xl border-2 ${getRarityBorder(badge.rarity)} bg-white shadow-lg text-center`}
-                  >
-                    <div className="text-5xl mb-3">{badge.icon}</div>
-                    <h3 className="font-bold text-gray-900 mb-1 text-sm">{badge.name}</h3>
-                    <p className="text-xs text-gray-600">{formatDate(badge.unlockedAt)}</p>
-                  </div>
-                ))}
+              <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-white/80 border border-[#ead9fb] shadow-[0_10px_24px_rgba(139,99,211,0.08)]">
+                <Crown className="w-4 h-4 text-[#8b63d3]" />
+                <span className="text-sm font-semibold">
+                  {maxPhotos} Image{maxPhotos > 1 ? 's' : ''} Limit
+                </span>
               </div>
-            </div>
-          </div>
-        )}
+            </motion.div>
 
-        {/* Badges Tab */}
-        {activeTab === 'badges' && (
-          <div className="space-y-6">
-            {/* Progress Summary */}
-            <div className="backdrop-blur-lg bg-white/80 rounded-2xl shadow-xl p-6 border border-white/50">
-              <div className="flex items-center justify-between">
-                <div>
-                  <h3 className="text-2xl font-bold text-gray-900">
-                    {unlockedBadges.length} / {badges.length} Badges Unlocked
-                  </h3>
-                  <p className="text-gray-600">Keep completing activities to unlock more rewards!</p>
-                </div>
-                <div className="text-5xl">🏅</div>
-              </div>
-              <div className="mt-4 w-full bg-gray-200 rounded-full h-3">
-                <div 
-                  className="bg-gradient-to-r from-[#8b63d3] to-[#6b46b8] h-3 rounded-full transition-all duration-500"
-                  style={{ width: `${badges.length ? (unlockedBadges.length / badges.length) * 100 : 0}%` }}
-                />
-              </div>
-            </div>
-
-            {/* Badges Grid */}
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-6">
-              {badges.map((badge) => (
-                <div
-                  key={badge.id}
-                  className={`backdrop-blur-lg rounded-2xl p-6 border-2 shadow-lg text-center transition-all ${
-                    badge.unlocked
-                      ? `${getRarityBorder(badge.rarity)} bg-white hover:scale-105`
-                      : 'border-gray-300 bg-gray-100/50 opacity-60'
-                  }`}
-                >
-                  <div className="relative inline-block mb-4">
-                    <div className="text-6xl">{badge.icon}</div>
-                    {badge.unlocked && (
-                      <div className="absolute -top-1 -right-1 w-6 h-6 rounded-full bg-green-500 flex items-center justify-center border-2 border-white">
-                        <Check className="w-4 h-4 text-white" />
-                      </div>
-                    )}
-                    {!badge.unlocked && (
-                      <div className="absolute inset-0 flex items-center justify-center bg-black/20 rounded-full">
-                        <Lock className="w-8 h-8 text-white" />
-                      </div>
-                    )}
-                  </div>
-                  <h3 className="font-bold text-gray-900 mb-2">{badge.name}</h3>
-                  <p className="text-xs text-gray-600 mb-3">{badge.description}</p>
-                  {badge.unlocked ? (
-                    <span className="inline-block px-3 py-1 rounded-full bg-green-100 text-green-800 text-xs font-semibold">
-                      Unlocked
-                    </span>
-                  ) : (
-                    <span className="inline-block px-3 py-1 rounded-full bg-gray-200 text-gray-600 text-xs font-semibold">
-                      {badge.requirement}
-                    </span>
-                  )}
-                  {badge.rarity && (
-                    <div className={`mt-2 inline-block px-2 py-1 rounded-lg bg-gradient-to-r ${getRarityColor(badge.rarity)} text-white text-xs font-bold uppercase`}>
-                      {badge.rarity}
-                    </div>
-                  )}
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* Rewards Tab */}
-        {activeTab === 'rewards' && (
-          <div className="space-y-6">
-            {/* Points Balance */}
-            <div className="backdrop-blur-lg bg-gradient-to-r from-[#ff8a7a] to-[#f2b8a0] rounded-3xl p-8 text-white shadow-xl">
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-white/80 mb-2">Available Points</p>
-                  <div className="text-5xl font-bold">{userStats.totalPoints.toLocaleString()}</div>
-                </div>
-                <div className="w-20 h-20 rounded-2xl bg-white/20 backdrop-blur flex items-center justify-center">
-                  <Gift className="w-10 h-10" />
-                </div>
-              </div>
-            </div>
-
-            {/* Rewards Grid */}
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-              {rewards.map((reward) => {
-                const canAfford = userStats.totalPoints >= reward.points;
-                return (
-                  <div
-                    key={reward.id}
-                    className={`backdrop-blur-lg bg-white/80 rounded-2xl overflow-hidden shadow-lg border border-white/50 transition-all ${
-                      canAfford ? 'hover:shadow-xl hover:scale-[1.02]' : 'opacity-60'
-                    }`}
-                  >
-                    <div className="relative">
-                      <img
-                        src={reward.image}
-                        alt={reward.title}
-                        className="w-full h-48 object-cover"
-                      />
-                      <div className="absolute top-4 right-4">
-                        <div className="px-4 py-2 rounded-full bg-[#cc5f57] text-white font-bold shadow-lg flex items-center gap-1">
-                          <Star className="w-4 h-4 fill-white" />
-                          {reward.points}
-                        </div>
-                      </div>
-                    </div>
-                    <div className="p-6">
-                      <h3 className="font-bold text-gray-900 mb-2">{reward.title}</h3>
-                      <p className="text-sm text-gray-600 mb-4">{reward.description}</p>
-                      <button
-                        onClick={() => claimReward(reward.id)}
-                        disabled={!canAfford || reward.claimed || claimingRewardId === reward.id}
-                        className={`w-full py-3 rounded-xl font-semibold transition-all ${
-                          canAfford && !reward.claimed
-                            ? 'bg-gradient-to-r from-[#ff8a7a] to-[#f2b8a0] text-white hover:shadow-lg'
-                            : 'bg-gray-200 text-gray-400 cursor-not-allowed'
+            {/* Scanner Core Section */}
+            <motion.div
+              initial={{ opacity: 0, scale: 0.9 }}
+              animate={{ opacity: 1, scale: 1 }}
+              transition={{ duration: 0.6, delay: 0.2 }}
+              className="relative w-full flex items-center justify-center"
+              style={{ height: 400 }}
+            >
+              {/* Counter above scanner */}
+              <motion.div
+                className="absolute -top-16 left-1/2 -translate-x-1/2 px-6 py-3 rounded-full border border-[#eddffb] bg-white/70 dark:bg-purple-900/20 backdrop-blur-xl shadow-lg"
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: 0.3 }}
+              >
+                <div className="flex items-center gap-3">
+                  <span className="text-sm text-gray-700 dark:text-gray-300 font-medium">
+                    <strong className="text-[#8b63d3]">{files.length}</strong> / {maxPhotos} photos
+                  </span>
+                  <div className="flex gap-1">
+                    {Array.from({ length: maxPhotos }).map((_, index) => (
+                      <div
+                        key={index}
+                        className={`w-2 h-2 rounded-full transition-all ${
+                          index < files.length
+                            ? "bg-[#8b63d3] scale-110"
+                            : "bg-gray-300 dark:bg-gray-600"
                         }`}
-                      >
-                        {reward.claimed
-                          ? 'Claimed'
-                          : claimingRewardId === reward.id
-                            ? 'Claiming...'
-                            : canAfford
-                              ? 'Claim Reward'
-                              : 'Not Enough Points'}
-                      </button>
-                      {reward.claimedAt && (
-                        <p className="mt-3 text-center text-xs text-gray-500">
-                          Claimed on {formatDate(reward.claimedAt)}
-                        </p>
-                      )}
+                      />
+                    ))}
+                  </div>
+                </div>
+              </motion.div>
+
+              {/* Scanner Core */}
+              <ScannerCore isScanning={uploading} />
+
+              {/* Action Buttons */}
+              <ScannerActions
+                onCamera={() => {
+                  if (isLimitReached) {
+                    toast.error(`Max ${maxPhotos} images reached`);
+                    return;
+                  }
+                  initSound();
+                  setShowCamera(true);
+                }}
+                onUpload={() => {
+                  if (!isLimitReached) {
+                    // Trigger hidden file input
+                    const fileInput = document.getElementById("file-input") as HTMLInputElement;
+                    fileInput?.click();
+                  }
+                }}
+                disabled={isLimitReached}
+              />
+            </motion.div>
+
+            {/* Photo Preview Grid */}
+            {files.length > 0 && (
+              <motion.div
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ duration: 0.5 }}
+                className="w-full"
+              >
+                <p className="text-center text-sm font-semibold text-gray-700 dark:text-gray-300 mb-4">
+                  Selected Photos
+                </p>
+                <div className="flex justify-center">
+                  <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4 max-w-2xl">
+                    <AnimatePresence>
+                      {files.map((file, index) => (
+                        <motion.div
+                          key={`${file.name}-${index}`}
+                          initial={{ opacity: 0, scale: 0.7 }}
+                          animate={{ opacity: 1, scale: 1 }}
+                          exit={{ opacity: 0, scale: 0.7 }}
+                          className="relative group"
+                        >
+                          <motion.div
+                            className="aspect-square rounded-2xl overflow-hidden border border-[#eddffb] bg-white/40 backdrop-blur-sm"
+                            whileHover={{ scale: 1.08 }}
+                          >
+                            <img
+                              src={previewUrls[index]}
+                              className="w-full h-full object-cover"
+                            />
+                            <div className="absolute inset-0 bg-gradient-to-br from-white/20 to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
+                          </motion.div>
+
+                          <button
+                            onClick={() => removeFile(index)}
+                            className="absolute -top-2 -right-2 w-7 h-7 bg-red-500 text-white rounded-full flex items-center justify-center opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity shadow-lg hover:bg-red-600"
+                            aria-label="Remove photo"
+                          >
+                            <X size={14} />
+                          </button>
+                        </motion.div>
+                      ))}
+                    </AnimatePresence>
+                  </div>
+                </div>
+              </motion.div>
+            )}
+
+            {/* Analyze Button */}
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.6, delay: 0.3 }}
+              className="w-full max-w-md"
+            >
+              <motion.div
+                whileHover={!uploading ? { scale: 1.02 } : {}}
+                whileTap={!uploading ? { scale: 0.98 } : {}}
+              >
+                <Button
+                  glow
+                  className="w-full h-14 text-lg font-semibold bg-gradient-to-r from-[#8b63d3] via-[#c95785] to-[#e8a1c0] hover:from-[#7a5325] hover:via-[#b83f6f] hover:to-[#d68fb0]"
+                  onClick={handleAnalyze}
+                  disabled={uploading || files.length === 0}
+                >
+                  {uploading ? (
+                    <motion.div
+                      animate={{ rotate: 360 }}
+                      transition={{ duration: 1, repeat: Infinity, ease: "linear" }}
+                      className="inline-block mr-2"
+                    >
+                      ◆
+                    </motion.div>
+                  ) : (
+                    "↗"
+                  )}
+                  {uploading ? "Analyzing Your Skin..." : "Analyze My Skin"}
+                </Button>
+              </motion.div>
+            </motion.div>
+
+            {/* Tips Card */}
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.6, delay: 0.4 }}
+              className="w-full"
+            >
+              <GlassCard className="bg-white/75 border border-[#eddffb] dark:bg-purple-900/20 p-6 backdrop-blur-xl">
+                <div className="flex items-start gap-3">
+                  <Info className="w-5 h-5 text-[#8b63d3] mt-1 flex-shrink-0" />
+                  <div className="text-sm text-gray-700 dark:text-gray-300">
+                    <p className="mb-3 font-semibold">For best results, capture from multiple angles:</p>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                      <ul className="list-disc list-inside space-y-1 text-gray-600 dark:text-gray-400">
+                        <li>Front view (face forward)</li>
+                        <li>Left side profile</li>
+                        <li>Right side profile</li>
+                      </ul>
+                      <ul className="list-disc list-inside space-y-1 text-gray-600 dark:text-gray-400">
+                        <li>Use natural lighting</li>
+                        <li>Remove makeup if possible</li>
+                        <li>Ensure photos are clear and focused</li>
+                      </ul>
                     </div>
                   </div>
-                );
-              })}
-            </div>
-
-            {/* Info Card */}
-            <div className="backdrop-blur-lg bg-gradient-to-br from-[#fff7ef] to-[#ffece2] rounded-2xl p-6 border border-[#f3d4b8]/70">
-              <div className="flex gap-4">
-                <div className="flex-shrink-0">
-                  <div className="w-10 h-10 rounded-full bg-[#ffe0cd] flex items-center justify-center">
-                    <Sparkles className="w-5 h-5 text-[#cc5f57]" />
-                  </div>
                 </div>
-                <div>
-                  <h4 className="font-semibold text-gray-900 mb-1">How to Earn Points</h4>
-                  <ul className="text-sm text-gray-600 space-y-1">
-                    <li>• Complete your daily routine: 50 points</li>
-                    <li>• Scan a product: 25 points</li>
-                    <li>• Read an article: 15 points</li>
-                    <li>• Maintain 7-day streak: 100 bonus points</li>
-                    <li>• Unlock a badge: 200 points</li>
-                  </ul>
+              </GlassCard>
+            </motion.div>
+          </div>
+
+          {/* Hidden file input */}
+          <input
+            id="file-input"
+            type="file"
+            hidden
+            multiple
+            accept="image/*"
+            onChange={handleFileChange}
+          />
+        </div>
+
+        {/* CAMERA MODAL - Enhanced UI */}
+        {showCamera && (
+          <motion.div
+            className="fixed inset-0 bg-black/80 backdrop-blur-xl flex items-center justify-center z-50 p-4"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.3 }}
+          >
+            <motion.div
+              className="relative w-[min(95vw,800px)]"
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              transition={{ duration: 0.3 }}
+            >
+              <Webcam
+                ref={webcamRef}
+                screenshotFormat="image/jpeg"
+                videoConstraints={{ facingMode: "user" }}
+                className="w-full rounded-3xl shadow-[0_20px_60px_rgba(0,0,0,0.6)]"
+              />
+
+              {/* 🎯 ENHANCED SCANNER OVAL GUIDE */}
+              <div className="absolute inset-0 flex items-center justify-center pointer-events-none rounded-3xl overflow-hidden">
+                <div className="relative h-80 w-64 sm:h-96 sm:w-72">
+                  {/* Main oval frame */}
+                  <motion.div
+                    className={`absolute inset-0 rounded-full border-2 transition-all duration-300 ${
+                      isCentered
+                        ? "border-emerald-300/90"
+                        : "border-white/50"
+                    }`}
+                    style={{
+                      boxShadow: isCentered
+                        ? "0 0 50px rgba(52,211,153,0.6), inset 0 0 40px rgba(52,211,153,0.3)"
+                        : "0 0 40px rgba(206,154,255,0.4), inset 0 0 30px rgba(245,183,220,0.25)",
+                    }}
+                    animate={{ scale: isCentered ? [1, 1.02, 1] : [1, 1.01, 1] }}
+                    transition={{ duration: 1.6, repeat: Infinity, ease: "easeInOut" }}
+                  />
+
+                  {/* Inner frame */}
+                  <motion.div
+                    className="absolute inset-1 rounded-full border border-[#eebee2]/80"
+                    style={{
+                      boxShadow: "0 0 30px rgba(195,140,255,0.35)",
+                    }}
+                    animate={{ opacity: [0.5, 0.9, 0.5] }}
+                    transition={{ duration: 2.8, repeat: Infinity, ease: "easeInOut" }}
+                  />
+
+                  {/* Scanning line */}
+                  <motion.div
+                    className="absolute left-1/2 top-2 h-1 w-40 -translate-x-1/2 rounded-full bg-gradient-to-r from-transparent via-white/80 to-transparent"
+                    animate={{ y: [0, 300, 0], opacity: [0.2, 0.9, 0.2] }}
+                    transition={{ duration: 3, repeat: Infinity, ease: "easeInOut" }}
+                  />
+
+                  {/* Corner markers */}
+                  {[
+                    "-left-2 top-8",
+                    "-left-2 bottom-8",
+                    "-right-2 top-8",
+                    "-right-2 bottom-8",
+                  ].map((position) => (
+                    <motion.span
+                      key={position}
+                      className={`absolute ${position} h-2 w-2 rounded-full bg-white/95 shadow-[0_0_16px_rgba(255,255,255,0.9)]`}
+                      animate={{ scale: [1, 1.3, 1], opacity: [0.6, 1, 0.6] }}
+                      transition={{ duration: 2, repeat: Infinity, ease: "easeInOut" }}
+                    />
+                  ))}
                 </div>
               </div>
-            </div>
-          </div>
+
+              {/* Close button */}
+              <motion.button
+                onClick={() => setShowCamera(false)}
+                className="absolute top-4 right-4 w-11 h-11 rounded-full bg-black/50 hover:bg-black/70 text-white border border-white/30 flex items-center justify-center transition-all backdrop-blur-md"
+                whileHover={{ scale: 1.1 }}
+                whileTap={{ scale: 0.95 }}
+                aria-label="Close camera"
+              >
+                <X size={20} />
+              </motion.button>
+
+              {/* Action buttons */}
+              <motion.div
+                className="flex flex-col sm:flex-row gap-4 mt-6 justify-center"
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: 0.2 }}
+              >
+                <Button
+                  onClick={capturePhoto}
+                  className="sm:w-auto px-8 h-12 bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-600 hover:to-teal-600"
+                  glow
+                >
+                  📷 Capture Photo
+                </Button>
+                <Button
+                  onClick={() => setShowCamera(false)}
+                  variant="secondary"
+                  className="sm:w-auto px-8 h-12"
+                >
+                  Cancel
+                </Button>
+              </motion.div>
+            </motion.div>
+          </motion.div>
         )}
+
       </div>
-    </div>
+    </PageTransition>
   );
 }
+

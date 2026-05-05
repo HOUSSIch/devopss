@@ -1,1608 +1,630 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useState, ChangeEvent, useRef, useEffect, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
+import Webcam from "react-webcam";
+
+
 import { Button } from "../components/Button";
-import { Input } from "../components/Input";
 import { GlassCard } from "../components/GlassCard";
+import { ProgressIndicator } from "../components/ProgressIndicator";
 import { PageTransition } from "../components/PageTransition";
-import { BackButton } from "../components/BackButton";
+import { ScannerCore } from "../components/ScannerCore";
+import { ScannerActions } from "../components/ScannerActions";
+
 import { motion, AnimatePresence } from "motion/react";
+import { Upload, AlertCircle, X, Crown, Camera, Info } from "lucide-react";
 import { useAuth } from "../contexts/AuthContext";
-import {
-  User,
-  Shield,
-  Bell,
-  Heart,
-  AlertCircle,
-  Save,
-  Camera,
-  Lock,
-  Key,
-  Database,
-  CheckCircle,
-  AlertTriangle,
-  Trash2,
-  ShieldCheck,
-  FileKey,
-  Server,
-  Globe,
-} from "lucide-react";
+import { http } from "../api/http";
+import { usePhotoLimit } from "../../hooks/useFeatureAccess";
+import { toast } from "sonner";
 
-function parseJwt(token: string): Record<string, any> {
-  try {
-    const base64 = token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
-    return JSON.parse(atob(base64));
-  } catch {
-    return {};
-  }
-}
+const cameraCrystal = new URL("../../assets/hd_restoration_result_image.png", import.meta.url).href;
 
-function getInitials(name: string): string {
-  return name
-    .split(" ")
-    .filter(Boolean)
-    .map((n) => n[0])
-    .join("")
-    .toUpperCase()
-    .slice(0, 2);
-}
-
-function normalizeDate(value: string | null | undefined): string {
-  if (!value) return "";
-  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
-
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "";
-  return date.toISOString().split("T")[0];
-}
-
-type PersonalInfo = {
-  firstName: string;
-  lastName: string;
-  email: string;
-  username: string;
-  phone: string;
-  birthday: string;
-  address: string;
-};
-
-type QuestionnaireForm = {
-  skinType: string;
-  sensitivityLevel: string;
-  symptoms: string[];
-  affectedAreas: string[];
-  concerns: string[];
-  allergies: string;
-  medicalHistory: string;
-  duration: string;
-  severity: string;
-  triggers: string[];
-  skincareRoutine: string;
-  sunscreenUsage: string;
-  stressLevel: string;
-  sleepQuality: string;
-  waterIntake: string;
-};
-
-const defaultQuestionnaire: QuestionnaireForm = {
-  skinType: "",
-  sensitivityLevel: "",
-  symptoms: [],
-  affectedAreas: [],
-  concerns: [],
-  allergies: "",
-  medicalHistory: "",
-  duration: "",
-  severity: "",
-  triggers: [],
-  skincareRoutine: "",
-  sunscreenUsage: "",
-  stressLevel: "",
-  sleepQuality: "",
-  waterIntake: "",
-};
-
-const skinTypes = ["Dry", "Oily", "Combination", "Normal", "Sensitive"];
-const sensitivityLevels = ["Low", "Moderate", "High", "Very High"];
-
-const symptomsOptions = [
-  "Itching",
-  "Burning",
-  "Redness",
-  "Flaking",
-  "Pain",
-  "Dry patches",
-  "Pimples",
-  "Cysts",
-  "Swelling",
-  "Tightness",
-  "Rash",
-  "Dark spots",
-];
-
-const affectedAreasOptions = [
-  "Forehead",
-  "Cheeks",
-  "Nose",
-  "Chin",
-  "Jawline",
-  "Neck",
-  "Around eyes",
-  "Whole face",
-  "Scalp",
-  "Body",
-];
-
-const concernsOptions = [
-  "Acne",
-  "Dark Spots",
-  "Wrinkles",
-  "Large Pores",
-  "Dullness",
-  "Redness",
-  "Uneven Tone",
-  "Dehydration",
-  "Blackheads",
-  "Whiteheads",
-  "Sensitivity",
-  "Early Aging",
-];
-
-const triggersOptions = [
-  "Stress",
-  "Sun exposure",
-  "Weather change",
-  "Hormonal changes",
-  "New skincare products",
-  "Diet",
-  "Makeup",
-  "Lack of sleep",
-  "Pollution",
-  "Menstrual cycle",
-];
-
-const durationsOptions = [
-  "Less than 1 week",
-  "1 to 4 weeks",
-  "1 to 3 months",
-  "More than 3 months",
-  "Recurring problem",
-];
-
-const severityOptions = ["Mild", "Moderate", "Severe"];
-const sunscreenOptions = ["Never", "Sometimes", "Often", "Every day"];
-const stressOptions = ["Low", "Moderate", "High"];
-const sleepOptions = ["Poor", "Average", "Good"];
-const waterOptions = ["Less than 1L", "1-2L", "More than 2L"];
-
-export function ProfilePage() {
+export function UploadPage() {
   const navigate = useNavigate();
-  const { token, username, roles, logout } = useAuth();
+  const { token, isAuthenticated, isInitialized, login, refreshNow } = useAuth();
+  const { maxPhotos } = usePhotoLimit();
 
-  const claims = useMemo(() => (token ? parseJwt(token) : {}), [token]);
+  const [uploading, setUploading] = useState(false);
+  const [files, setFiles] = useState<File[]>([]);
+  const [showCamera, setShowCamera] = useState(false);
+  const [isCentered, setIsCentered] = useState(false);
+  const isLimitReached = files.length >= maxPhotos;
 
-  const firstNameFromToken = claims.given_name || "";
-  const lastNameFromToken = claims.family_name || "";
-  const emailFromToken =
-    claims.email || claims.preferred_username || username || "";
+  const webcamRef = useRef<Webcam | null>(null);
 
-  const [activeTab, setActiveTab] = useState<
-    "personal" | "skin" | "security" | "notifications"
-  >("personal");
-  const [saved, setSaved] = useState(false);
-  const [loading, setLoading] = useState(false);
-  const [loadingProfile, setLoadingProfile] = useState(true);
-  const [loadingSkinPrefs, setLoadingSkinPrefs] = useState(true);
-  const [error, setError] = useState("");
-  const [profileImage, setProfileImage] = useState<string | null>(null);
-  const [showDeleteModal, setShowDeleteModal] = useState(false);
-  const [deleteConfirmation, setDeleteConfirmation] = useState("");
+  // 🔊 SOUND FIX (UNLOCK AFTER USER CLICK)
+  const audioRef = useRef<HTMLAudioElement | null>(null);
 
-  const [currentPassword, setCurrentPassword] = useState("");
-  const [newPassword, setNewPassword] = useState("");
-  const [confirmPassword, setConfirmPassword] = useState("");
-  const [passwordLoading, setPasswordLoading] = useState(false);
-  const [passwordError, setPasswordError] = useState("");
-  const [passwordSuccess, setPasswordSuccess] = useState("");
+  const initSound = () => {
+    if (!audioRef.current) {
+      audioRef.current = new Audio("/beep.mp3");
 
-  const [personalInfo, setPersonalInfo] = useState<PersonalInfo>({
-    firstName: "",
-    lastName: "",
-    email: "",
-    username: "",
-    phone: "",
-    birthday: "",
-    address: "",
-  });
-
-  const [skinPreferences, setSkinPreferences] =
-    useState<QuestionnaireForm>(defaultQuestionnaire);
-
-  const fullName =
-    `${personalInfo.firstName} ${personalInfo.lastName}`.trim() ||
-    username ||
-    "Utilisateur";
-
-  const fetchProfile = useCallback(async () => {
-    if (!token) {
-      setLoadingProfile(false);
-      return;
+      // unlock audio (browser requirement)
+      audioRef.current
+        .play()
+        .then(() => {
+          audioRef.current?.pause();
+          if (audioRef.current) audioRef.current.currentTime = 0;
+        })
+        .catch(() => {});
     }
+  };
 
-    try {
-      setLoadingProfile(true);
-      setError("");
-
-      const API = (import.meta.env.VITE_API_URL as string) || "http://localhost:3000";
-      const response = await fetch(`${API}/users/me`, {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      });
-
-      if (!response.ok) {
-        const message = await response.text();
-        throw new Error(message || "Failed to load profile");
-      }
-
-      const data = await response.json();
-
-      setPersonalInfo({
-        firstName: data.firstName ?? firstNameFromToken,
-        lastName: data.lastName ?? lastNameFromToken,
-        email: data.email ?? emailFromToken,
-        username: data.username ?? claims.preferred_username ?? username ?? "",
-        phone: data.phone ?? "",
-        birthday: normalizeDate(data.birthday),
-        address: data.address ?? "",
-      });
-    } catch (err: any) {
-      setError(err.message || "Unable to load profile");
-    } finally {
-      setLoadingProfile(false);
+  const playSound = () => {
+    if (audioRef.current) {
+      audioRef.current.currentTime = 0;
+      audioRef.current.play().catch(() => {});
     }
-  }, [
-    token,
-    firstNameFromToken,
-    lastNameFromToken,
-    emailFromToken,
-    claims.preferred_username,
-    username,
-  ]);
+  };
 
-  const fetchQuestionnaire = useCallback(async () => {
-    if (!token) {
-      setLoadingSkinPrefs(false);
-      return;
-    }
-
-    try {
-      setLoadingSkinPrefs(true);
-
-      const API2 = (import.meta.env.VITE_API_URL as string) || "http://localhost:3000";
-      const response = await fetch(`${API2}/users/questionnaire/me`, {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      });
-
-      if (response.status === 404) {
-        setSkinPreferences(defaultQuestionnaire);
-        return;
-      }
-
-      const rawText = await response.text();
-
-      if (!response.ok) {
-        throw new Error(rawText || "Failed to load questionnaire");
-      }
-
-      if (!rawText || rawText.trim() === "") {
-        setSkinPreferences(defaultQuestionnaire);
-        return;
-      }
-
-      const data = JSON.parse(rawText);
-
-      if (!data) {
-        setSkinPreferences(defaultQuestionnaire);
-        return;
-      }
-
-      setSkinPreferences({
-        skinType: data.skinType ?? "",
-        sensitivityLevel: data.sensitivityLevel ?? "",
-        symptoms: Array.isArray(data.symptoms) ? data.symptoms : [],
-        affectedAreas: Array.isArray(data.affectedAreas)
-          ? data.affectedAreas
-          : [],
-        concerns: Array.isArray(data.concerns) ? data.concerns : [],
-        allergies: data.allergies ?? "",
-        medicalHistory: data.medicalHistory ?? "",
-        duration: data.duration ?? "",
-        severity: data.severity ?? "",
-        triggers: Array.isArray(data.triggers) ? data.triggers : [],
-        skincareRoutine: data.skincareRoutine ?? "",
-        sunscreenUsage: data.sunscreenUsage ?? "",
-        stressLevel: data.stressLevel ?? "",
-        sleepQuality: data.sleepQuality ?? "",
-        waterIntake: data.waterIntake ?? "",
-      });
-    } catch (err: any) {
-      setError(err.message || "Unable to load skin preferences");
-    } finally {
-      setLoadingSkinPrefs(false);
-    }
-  }, [token]);
+  const previewUrls = useMemo(
+    () => files.map((file) => URL.createObjectURL(file)),
+    [files],
+  );
 
   useEffect(() => {
-    fetchProfile();
-    fetchQuestionnaire();
-  }, [fetchProfile, fetchQuestionnaire]);
+    return () => {
+      previewUrls.forEach((url) => URL.revokeObjectURL(url));
+    };
+  }, [previewUrls]);
 
-  const handleSave = async () => {
-    if (!token) return;
+  // 📂 Upload
+  const handleFileChange = (e: ChangeEvent<HTMLInputElement>) => {
+    if (!e.target.files) return;
+
+    const incomingFiles = Array.from(e.target.files);
+    const newFiles = incomingFiles.filter((file) => file.type.startsWith("image/"));
+    const remainingSlots = maxPhotos - files.length;
+
+    if (newFiles.length !== incomingFiles.length) {
+      toast.error("Only image files are allowed");
+    }
+
+    if (remainingSlots === 0) {
+      toast.error(`Max ${maxPhotos} images reached`);
+      return;
+    }
+
+    setFiles((prev) => [...prev, ...newFiles.slice(0, remainingSlots)]);
+  };
+
+  // ❌ remove
+  const removeFile = (index: number) => {
+    setFiles((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  // 📸 capture
+  const capturePhoto = () => {
+    if (files.length >= maxPhotos) {
+      toast.error(`Max ${maxPhotos} images reached`);
+      return;
+    }
+
+    if (!webcamRef.current) return;
+
+    const imageSrc = webcamRef.current.getScreenshot();
+    if (!imageSrc) return;
+
+    const byteString = atob(imageSrc.split(",")[1]);
+    const mimeString = imageSrc.split(",")[0].split(":")[1].split(";")[0];
+
+    const ab = new ArrayBuffer(byteString.length);
+    const ia = new Uint8Array(ab);
+
+    for (let i = 0; i < byteString.length; i++) {
+      ia[i] = byteString.charCodeAt(i);
+    }
+
+    const file = new File([ab], "camera.jpg", { type: mimeString });
+
+    setFiles((prev) => [...prev, file].slice(0, maxPhotos));
+    setShowCamera(false);
+  };
+
+  // 🎯 simple center effect (visual only)
+  useEffect(() => {
+    if (!showCamera) return;
+
+    const interval = setInterval(() => {
+      const centered = Math.random() > 0.5;
+
+      setIsCentered(centered);
+
+      if (centered) {
+        playSound();
+      }
+    }, 2000);
+
+    return () => clearInterval(interval);
+  }, [showCamera]);
+
+  // 🚀 analyze
+  const handleAnalyze = async () => {
+    if (!files.length) return toast.error("Upload at least one photo");
+
+    if (!isInitialized) return toast.error("Auth initializing...");
+    if (!isAuthenticated) {
+      login("/upload");
+      return;
+    }
+
+    setUploading(true);
+
+    const formData = new FormData();
+    formData.append("image", files[0]);
 
     try {
-      setLoading(true);
-      setError("");
+      await refreshNow();
 
-      if (activeTab === "skin") {
-        const API3 = (import.meta.env.VITE_API_URL as string) || "http://localhost:3000";
-        const response = await fetch(`${API3}/users/questionnaire`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${token}`,
-          },
-          body: JSON.stringify({
-            ...skinPreferences,
-            triggers: Array.isArray(skinPreferences.triggers)
-              ? skinPreferences.triggers
-              : [],
-            symptoms: Array.isArray(skinPreferences.symptoms)
-              ? skinPreferences.symptoms
-              : [],
-            affectedAreas: Array.isArray(skinPreferences.affectedAreas)
-              ? skinPreferences.affectedAreas
-              : [],
-            concerns: Array.isArray(skinPreferences.concerns)
-              ? skinPreferences.concerns
-              : [],
-          }),
-        });
-
-        const rawText = await response.text();
-        let data: any = null;
-
-        if (rawText && rawText.trim() !== "") {
-          try {
-            data = JSON.parse(rawText);
-          } catch {
-            data = null;
-          }
-        }
-
-        if (!response.ok) {
-          throw new Error(
-            data?.message || rawText || "Failed to save skin preferences"
-          );
-        }
-
-        setSaved(true);
-        setTimeout(() => setSaved(false), 3000);
-        return;
-      }
-
-      const API4 = (import.meta.env.VITE_API_URL as string) || "http://localhost:3000";
-      const response = await fetch(`${API4}/users/me`, {
-        method: "PATCH",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({
-          firstName: personalInfo.firstName,
-          lastName: personalInfo.lastName,
-          email: personalInfo.email,
-          username: personalInfo.username,
-          phone: personalInfo.phone,
-          birthday: personalInfo.birthday,
-          address: personalInfo.address,
-        }),
+      const API = (import.meta.env.VITE_API_URL as string) || "http://localhost:3000";
+      const res = await fetch(`${API}/ai/analyze`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+        body: formData,
       });
 
-      if (!response.ok) {
-        const message = await response.text();
-        throw new Error(message || "Failed to save profile");
-      }
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.message || "Error");
 
-      await fetchProfile();
-
-      setSaved(true);
-      setTimeout(() => setSaved(false), 3000);
+      localStorage.setItem("skinAnalysisResult", JSON.stringify(data));
+      navigate("/results");
     } catch (err: any) {
-      setError(err.message || "Unexpected error while saving");
+      toast.error(err.message);
     } finally {
-      setLoading(false);
+      setUploading(false);
     }
   };
-
-  const handleChangePassword = async () => {
-    if (!token) return;
-
-    try {
-      setPasswordLoading(true);
-      setPasswordError("");
-      setPasswordSuccess("");
-
-      if (!currentPassword || !newPassword || !confirmPassword) {
-        setPasswordError("All password fields are required");
-        return;
-      }
-
-      if (newPassword !== confirmPassword) {
-        setPasswordError("New password and confirmation do not match");
-        return;
-      }
-
-      if (newPassword.length < 8) {
-        setPasswordError("New password must contain at least 8 characters");
-        return;
-      }
-
-      if (currentPassword === newPassword) {
-        setPasswordError(
-          "New password must be different from current password"
-        );
-        return;
-      }
-
-      const API5 = (import.meta.env.VITE_API_URL as string) || "http://localhost:3000";
-      const response = await fetch(`${API5}/users/me/password`, {
-        method: "PATCH",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({
-          currentPassword,
-          newPassword,
-          confirmPassword,
-        }),
-      });
-
-      const data = await response.json().catch(() => null);
-
-      if (!response.ok) {
-        throw new Error(
-          data?.message || data?.error || "Failed to change password"
-        );
-      }
-
-      setPasswordSuccess("Password changed successfully");
-      setCurrentPassword("");
-      setNewPassword("");
-      setConfirmPassword("");
-    } catch (err: any) {
-      setPasswordError(
-        err.message || "Unexpected error while changing password"
-      );
-    } finally {
-      setPasswordLoading(false);
-    }
-  };
-
-  const handleProfileImageUpload = (
-    e: React.ChangeEvent<HTMLInputElement>
-  ) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    const reader = new FileReader();
-    reader.onloadend = () => setProfileImage(reader.result as string);
-    reader.readAsDataURL(file);
-  };
-
-  const handleDeleteAccount = () => {
-    if (deleteConfirmation === "DELETE") {
-      logout();
-    }
-  };
-
-  const toggleQuestionnaireArray = (
-    field: "symptoms" | "affectedAreas" | "concerns" | "triggers",
-    value: string
-  ) => {
-    setSkinPreferences((prev) => ({
-      ...prev,
-      [field]: prev[field].includes(value)
-        ? prev[field].filter((item) => item !== value)
-        : [...prev[field], value],
-    }));
-  };
-
-  const tabs = [
-    { id: "personal", label: "Personal Info", icon: User },
-    { id: "skin", label: "Skin Preferences", icon: Heart },
-    { id: "security", label: "Security & Privacy", icon: Shield },
-    { id: "notifications", label: "Notifications", icon: Bell },
-  ] as const;
 
   return (
-    <PageTransition direction="fade">
-      <div className="min-h-screen bg-[#fdf8f3] dark:bg-[#1a0f2e] p-6 py-12 deepskyn-atmosphere">
-        <div className="max-w-5xl mx-auto">
-          <BackButton />
+    <PageTransition direction="left">
+      <div className="relative isolate min-h-screen overflow-hidden bg-[#f4edf9] dark:bg-[#1a0f2e] flex items-center justify-center p-4 pt-24 sm:p-6 sm:pt-20">
+        {/* AI BACKGROUND LAYERS */}
+        <div className="pointer-events-none absolute inset-0 z-0">
+          <motion.img
+            src={cameraCrystal}
+            alt=""
+            aria-hidden="true"
+            className="absolute right-[6%] top-[14%] w-[280px] sm:w-[340px] opacity-[0.28] blur-[0.4px]"
+            style={{ filter: "drop-shadow(0 20px 42px rgba(165,103,255,0.28))" }}
+            animate={{ y: [0, -22, 0], x: [0, -16, 0], rotate: [0, 1.8, 0] }}
+            transition={{ duration: 10, repeat: Infinity, ease: "easeInOut" }}
+          />
 
+          <motion.img
+            src={cameraCrystal}
+            alt=""
+            aria-hidden="true"
+            className="absolute left-[5%] bottom-[8%] w-[190px] sm:w-[240px] opacity-[0.18] scale-x-[-1]"
+            style={{ filter: "drop-shadow(0 14px 36px rgba(165,103,255,0.2))" }}
+            animate={{ y: [0, 16, 0], x: [0, 12, 0], rotate: [0, -1.6, 0] }}
+            transition={{ duration: 12, repeat: Infinity, ease: "easeInOut" }}
+          />
+
+          <div
+            className="absolute inset-0"
+            style={{
+              background:
+                "radial-gradient(1200px 620px at 10% 10%, rgba(249,188,218,0.48), transparent 60%), radial-gradient(980px 560px at 90% 15%, rgba(196,145,255,0.42), transparent 58%), radial-gradient(820px 500px at 50% 92%, rgba(255,201,174,0.36), transparent 58%)",
+            }}
+          />
+
+          <motion.div
+            className="absolute -top-28 -left-24 h-[420px] w-[420px] rounded-full bg-[radial-gradient(circle_at_center,rgba(252,197,223,0.62),rgba(252,197,223,0)_70%)] blur-3xl"
+            animate={{ x: [0, 52, 0], y: [0, 30, 0] }}
+            transition={{ duration: 18, repeat: Infinity, ease: "easeInOut" }}
+          />
+          <motion.div
+            className="absolute top-[22%] -right-28 h-[440px] w-[440px] rounded-full bg-[radial-gradient(circle_at_center,rgba(205,171,255,0.52),rgba(205,171,255,0)_70%)] blur-3xl"
+            animate={{ x: [0, -42, 0], y: [0, -26, 0] }}
+            transition={{ duration: 20, repeat: Infinity, ease: "easeInOut" }}
+          />
+          <motion.div
+            className="absolute -bottom-32 left-[24%] h-[420px] w-[420px] rounded-full bg-[radial-gradient(circle_at_center,rgba(255,199,173,0.48),rgba(255,199,173,0)_72%)] blur-3xl"
+            animate={{ x: [0, 36, 0], y: [0, -32, 0] }}
+            transition={{ duration: 22, repeat: Infinity, ease: "easeInOut" }}
+          />
+
+          <motion.div
+            className="absolute -left-[35%] top-[-20%] h-[180%] w-[55%] rotate-[16deg] opacity-[0.3]"
+            style={{
+              background:
+                "linear-gradient(180deg, rgba(255,255,255,0), rgba(247,189,220,0.94), rgba(196,145,255,0.7), rgba(255,255,255,0))",
+              filter: "blur(42px)",
+            }}
+            animate={{ x: ["0%", "280%"] }}
+            transition={{ duration: 10, repeat: Infinity, ease: "linear" }}
+          />
+
+          {/* Floating AI particles */}
+          <motion.div
+            className="absolute left-[5%] top-[18%] h-36 w-36 rounded-full bg-[radial-gradient(circle_at_30%_30%,rgba(255,218,236,0.98),rgba(255,218,236,0))] blur-2xl"
+            animate={{ x: [0, 78, 0], y: [0, -52, 0], scale: [1, 1.08, 1] }}
+            transition={{ duration: 11, repeat: Infinity, ease: "easeInOut" }}
+          />
+          <motion.div
+            className="absolute right-[7%] top-[30%] h-32 w-32 rounded-full bg-[radial-gradient(circle_at_40%_35%,rgba(210,183,255,0.94),rgba(210,183,255,0))] blur-2xl"
+            animate={{ x: [0, -64, 0], y: [0, 42, 0], scale: [1, 1.1, 1] }}
+            transition={{ duration: 12, repeat: Infinity, ease: "easeInOut" }}
+          />
+          <motion.div
+            className="absolute left-[16%] bottom-[11%] h-28 w-28 rounded-full bg-[radial-gradient(circle_at_center,rgba(255,218,193,0.92),rgba(255,218,193,0))] blur-xl"
+            animate={{ x: [0, 54, 0], y: [0, -34, 0], scale: [1, 1.08, 1] }}
+            transition={{ duration: 10, repeat: Infinity, ease: "easeInOut" }}
+          />
+          <motion.div
+            className="absolute right-[14%] bottom-[16%] h-40 w-40 rounded-full bg-[radial-gradient(circle_at_center,rgba(233,198,255,0.84),rgba(233,198,255,0))] blur-2xl"
+            animate={{ x: [0, -58, 0], y: [0, -40, 0], scale: [1, 1.08, 1] }}
+            transition={{ duration: 14, repeat: Infinity, ease: "easeInOut" }}
+          />
+          {["left-[10%] top-[12%]", "left-[84%] top-[16%]", "left-[78%] top-[72%]", "left-[20%] top-[70%]", "left-[64%] top-[26%]", "left-[35%] top-[82%]"]
+            .map((position, index) => (
+              <motion.span
+                key={position}
+                className={`absolute ${position} h-2.5 w-2.5 rounded-full bg-white/80 shadow-[0_0_18px_rgba(245,183,220,0.72)]`}
+                animate={{ y: [0, -24, 0], x: [0, 8, 0], opacity: [0.4, 1, 0.4] }}
+                transition={{ duration: 4 + index * 0.5, repeat: Infinity, ease: "easeInOut" }}
+              />
+            ))}
+
+          <div
+            className="absolute inset-0 opacity-[0.1] dark:opacity-[0.14]"
+            style={{
+              backgroundImage:
+                "linear-gradient(rgba(139,99,211,0.22) 1px, transparent 1px), linear-gradient(90deg, rgba(139,99,211,0.18) 1px, transparent 1px)",
+              backgroundSize: "52px 52px",
+            }}
+          />
+
+          <div
+            className="absolute inset-0 opacity-[0.12] dark:opacity-[0.16]"
+            style={{
+              backgroundImage:
+                "radial-gradient(circle at center, rgba(139,99,211,0.35) 1px, transparent 1.2px)",
+              backgroundSize: "30px 30px",
+            }}
+          />
+
+          <motion.div
+            className="absolute inset-0 opacity-[0.14] dark:opacity-[0.2]"
+            style={{
+              backgroundImage:
+                "repeating-linear-gradient(180deg, rgba(139,99,211,0.3) 0px, rgba(139,99,211,0.3) 1px, transparent 1px, transparent 10px)",
+            }}
+            animate={{ y: [0, 34, 0] }}
+            transition={{ duration: 9, repeat: Infinity, ease: "linear" }}
+          />
+        </div>
+
+        <div className="relative z-10 w-full max-w-6xl">
+          {/* Progress bar */}
           <motion.div
             initial={{ opacity: 0, y: -20 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.6 }}
-            className="text-center mb-10"
+            className="mb-12"
           >
-            <div className="inline-flex items-center gap-2 rounded-full border border-[#ff8a7a]/30 bg-white/80 px-4 py-1.5 text-xs font-semibold tracking-wider text-[#cc5f57] mb-4">
-              <Shield className="w-3.5 h-3.5" />
-              PERSONAL CONTROL CENTER
-            </div>
-            <h1 className="text-5xl text-gray-800 mb-3">Account Settings</h1>
-            <p className="text-gray-600 text-xl">
-              Manage your profile and preferences
-            </p>
+            <ProgressIndicator currentStep={3} totalSteps={4} />
           </motion.div>
 
-          <motion.div
-            initial={{ opacity: 0, y: 16 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.45, delay: 0.05 }}
-            className="mb-8"
-          >
-            <GlassCard className="p-4 bg-gradient-to-r from-[#fff7ef] via-white/90 to-[#fff1ea] border border-[#f3d4b8]/60">
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                <div className="rounded-xl bg-white/85 border border-[#f3d4b8]/50 px-4 py-3">
-                  <p className="text-xs uppercase tracking-wider text-[#cc5f57] font-semibold">Profile Status</p>
-                  <p className="text-sm font-semibold text-gray-700 mt-1">
-                    {loadingProfile ? "Syncing profile..." : "Profile synced"}
-                  </p>
-                </div>
-                <div className="rounded-xl bg-white/85 border border-[#f3d4b8]/50 px-4 py-3">
-                  <p className="text-xs uppercase tracking-wider text-[#cc5f57] font-semibold">Skin Data</p>
-                  <p className="text-sm font-semibold text-gray-700 mt-1">
-                    {loadingSkinPrefs ? "Loading preferences..." : "Preferences ready"}
-                  </p>
-                </div>
-                <div className="rounded-xl bg-white/85 border border-[#f3d4b8]/50 px-4 py-3">
-                  <p className="text-xs uppercase tracking-wider text-[#cc5f57] font-semibold">Roles</p>
-                  <p className="text-sm font-semibold text-gray-700 mt-1">{Math.max(roles.length, 1)} access profile(s)</p>
-                </div>
+          {/* Main scanner interface */}
+          <div className="flex flex-col items-center gap-12">
+            {/* Header */}
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.6, delay: 0.1 }}
+              className="text-center space-y-3"
+            >
+              <h2 className="text-3xl md:text-4xl font-semibold text-gray-800 dark:text-white">
+                AI Skin Scanner
+              </h2>
+              <p className="text-gray-500 text-sm md:text-base max-w-xl mx-auto">
+                Upload up to {maxPhotos} clear photos for advanced AI analysis
+              </p>
+
+              <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-white/80 border border-[#ead9fb] shadow-[0_10px_24px_rgba(139,99,211,0.08)]">
+                <Crown className="w-4 h-4 text-[#8b63d3]" />
+                <span className="text-sm font-semibold">
+                  {maxPhotos} Image{maxPhotos > 1 ? 's' : ''} Limit
+                </span>
               </div>
-            </GlassCard>
-          </motion.div>
+            </motion.div>
 
-          <motion.div
-            initial={{ opacity: 0, scale: 0.9 }}
-            animate={{ opacity: 1, scale: 1 }}
-            transition={{ duration: 0.5, delay: 0.1 }}
-            className="mb-8"
-          >
-            <GlassCard className="flex items-center gap-6 bg-white/80 border border-[#f3d4b8]/50">
-              <div className="relative">
-                {profileImage ? (
-                  <img
-                    src={profileImage}
-                    alt="Profile"
-                    className="w-24 h-24 rounded-full object-cover"
-                  />
-                ) : (
-                  <div className="w-24 h-24 rounded-full bg-gradient-to-br from-[#ff8a7a] to-[#f2b8a0] flex items-center justify-center text-white text-3xl font-bold shadow-lg">
-                    {getInitials(fullName)}
+            {/* Scanner Core Section */}
+            <motion.div
+              initial={{ opacity: 0, scale: 0.9 }}
+              animate={{ opacity: 1, scale: 1 }}
+              transition={{ duration: 0.6, delay: 0.2 }}
+              className="relative w-full flex items-center justify-center"
+              style={{ height: 400 }}
+            >
+              {/* Counter above scanner */}
+              <motion.div
+                className="absolute -top-16 left-1/2 -translate-x-1/2 px-6 py-3 rounded-full border border-[#eddffb] bg-white/70 dark:bg-purple-900/20 backdrop-blur-xl shadow-lg"
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: 0.3 }}
+              >
+                <div className="flex items-center gap-3">
+                  <span className="text-sm text-gray-700 dark:text-gray-300 font-medium">
+                    <strong className="text-[#8b63d3]">{files.length}</strong> / {maxPhotos} photos
+                  </span>
+                  <div className="flex gap-1">
+                    {Array.from({ length: maxPhotos }).map((_, index) => (
+                      <div
+                        key={index}
+                        className={`w-2 h-2 rounded-full transition-all ${
+                          index < files.length
+                            ? "bg-[#8b63d3] scale-110"
+                            : "bg-gray-300 dark:bg-gray-600"
+                        }`}
+                      />
+                    ))}
                   </div>
-                )}
-                <label className="absolute bottom-0 right-0 w-8 h-8 rounded-full bg-white shadow-lg flex items-center justify-center hover:scale-110 transition-transform cursor-pointer">
-                  <Camera className="w-4 h-4 text-[#cc5f57]" />
-                  <input
-                    type="file"
-                    accept="image/*"
-                    onChange={handleProfileImageUpload}
-                    className="hidden"
-                  />
-                </label>
-              </div>
+                </div>
+              </motion.div>
 
-              <div className="flex-1">
-                <h3 className="text-2xl text-gray-800 mb-1 font-bold">
-                  {fullName}
-                </h3>
-                <p className="text-gray-600">{personalInfo.email}</p>
-                <div className="flex gap-2 mt-2 flex-wrap">
-                  {roles.map((role) => (
-                    <span
-                      key={role}
-                      className="px-2 py-0.5 text-xs rounded-full bg-[#ffe7d3] text-[#cc5f57] font-semibold capitalize"
+              {/* Scanner Core */}
+              <ScannerCore isScanning={uploading} />
+
+              {/* Action Buttons */}
+              <ScannerActions
+                onCamera={() => {
+                  if (isLimitReached) {
+                    toast.error(`Max ${maxPhotos} images reached`);
+                    return;
+                  }
+                  initSound();
+                  setShowCamera(true);
+                }}
+                onUpload={() => {
+                  if (!isLimitReached) {
+                    // Trigger hidden file input
+                    const fileInput = document.getElementById("file-input") as HTMLInputElement;
+                    fileInput?.click();
+                  }
+                }}
+                disabled={isLimitReached}
+              />
+            </motion.div>
+
+            {/* Photo Preview Grid */}
+            {files.length > 0 && (
+              <motion.div
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ duration: 0.5 }}
+                className="w-full"
+              >
+                <p className="text-center text-sm font-semibold text-gray-700 dark:text-gray-300 mb-4">
+                  Selected Photos
+                </p>
+                <div className="flex justify-center">
+                  <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4 max-w-2xl">
+                    <AnimatePresence>
+                      {files.map((file, index) => (
+                        <motion.div
+                          key={`${file.name}-${index}`}
+                          initial={{ opacity: 0, scale: 0.7 }}
+                          animate={{ opacity: 1, scale: 1 }}
+                          exit={{ opacity: 0, scale: 0.7 }}
+                          className="relative group"
+                        >
+                          <motion.div
+                            className="aspect-square rounded-2xl overflow-hidden border border-[#eddffb] bg-white/40 backdrop-blur-sm"
+                            whileHover={{ scale: 1.08 }}
+                          >
+                            <img
+                              src={previewUrls[index]}
+                              className="w-full h-full object-cover"
+                            />
+                            <div className="absolute inset-0 bg-gradient-to-br from-white/20 to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
+                          </motion.div>
+
+                          <button
+                            onClick={() => removeFile(index)}
+                            className="absolute -top-2 -right-2 w-7 h-7 bg-red-500 text-white rounded-full flex items-center justify-center opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity shadow-lg hover:bg-red-600"
+                            aria-label="Remove photo"
+                          >
+                            <X size={14} />
+                          </button>
+                        </motion.div>
+                      ))}
+                    </AnimatePresence>
+                  </div>
+                </div>
+              </motion.div>
+            )}
+
+            {/* Analyze Button */}
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.6, delay: 0.3 }}
+              className="w-full max-w-md"
+            >
+              <motion.div
+                whileHover={!uploading ? { scale: 1.02 } : {}}
+                whileTap={!uploading ? { scale: 0.98 } : {}}
+              >
+                <Button
+                  glow
+                  className="w-full h-14 text-lg font-semibold bg-gradient-to-r from-[#8b63d3] via-[#c95785] to-[#e8a1c0] hover:from-[#7a5325] hover:via-[#b83f6f] hover:to-[#d68fb0]"
+                  onClick={handleAnalyze}
+                  disabled={uploading || files.length === 0}
+                >
+                  {uploading ? (
+                    <motion.div
+                      animate={{ rotate: 360 }}
+                      transition={{ duration: 1, repeat: Infinity, ease: "linear" }}
+                      className="inline-block mr-2"
                     >
-                      {role}
-                    </span>
+                      ◆
+                    </motion.div>
+                  ) : (
+                    "↗"
+                  )}
+                  {uploading ? "Analyzing Your Skin..." : "Analyze My Skin"}
+                </Button>
+              </motion.div>
+            </motion.div>
+
+            {/* Tips Card */}
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.6, delay: 0.4 }}
+              className="w-full"
+            >
+              <GlassCard className="bg-white/75 border border-[#eddffb] dark:bg-purple-900/20 p-6 backdrop-blur-xl">
+                <div className="flex items-start gap-3">
+                  <Info className="w-5 h-5 text-[#8b63d3] mt-1 flex-shrink-0" />
+                  <div className="text-sm text-gray-700 dark:text-gray-300">
+                    <p className="mb-3 font-semibold">For best results, capture from multiple angles:</p>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                      <ul className="list-disc list-inside space-y-1 text-gray-600 dark:text-gray-400">
+                        <li>Front view (face forward)</li>
+                        <li>Left side profile</li>
+                        <li>Right side profile</li>
+                      </ul>
+                      <ul className="list-disc list-inside space-y-1 text-gray-600 dark:text-gray-400">
+                        <li>Use natural lighting</li>
+                        <li>Remove makeup if possible</li>
+                        <li>Ensure photos are clear and focused</li>
+                      </ul>
+                    </div>
+                  </div>
+                </div>
+              </GlassCard>
+            </motion.div>
+          </div>
+
+          {/* Hidden file input */}
+          <input
+            id="file-input"
+            type="file"
+            hidden
+            multiple
+            accept="image/*"
+            onChange={handleFileChange}
+          />
+        </div>
+
+        {/* CAMERA MODAL - Enhanced UI */}
+        {showCamera && (
+          <motion.div
+            className="fixed inset-0 bg-black/80 backdrop-blur-xl flex items-center justify-center z-50 p-4"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.3 }}
+          >
+            <motion.div
+              className="relative w-[min(95vw,800px)]"
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              transition={{ duration: 0.3 }}
+            >
+              <Webcam
+                ref={webcamRef}
+                screenshotFormat="image/jpeg"
+                videoConstraints={{ facingMode: "user" }}
+                className="w-full rounded-3xl shadow-[0_20px_60px_rgba(0,0,0,0.6)]"
+              />
+
+              {/* 🎯 ENHANCED SCANNER OVAL GUIDE */}
+              <div className="absolute inset-0 flex items-center justify-center pointer-events-none rounded-3xl overflow-hidden">
+                <div className="relative h-80 w-64 sm:h-96 sm:w-72">
+                  {/* Main oval frame */}
+                  <motion.div
+                    className={`absolute inset-0 rounded-full border-2 transition-all duration-300 ${
+                      isCentered
+                        ? "border-emerald-300/90"
+                        : "border-white/50"
+                    }`}
+                    style={{
+                      boxShadow: isCentered
+                        ? "0 0 50px rgba(52,211,153,0.6), inset 0 0 40px rgba(52,211,153,0.3)"
+                        : "0 0 40px rgba(206,154,255,0.4), inset 0 0 30px rgba(245,183,220,0.25)",
+                    }}
+                    animate={{ scale: isCentered ? [1, 1.02, 1] : [1, 1.01, 1] }}
+                    transition={{ duration: 1.6, repeat: Infinity, ease: "easeInOut" }}
+                  />
+
+                  {/* Inner frame */}
+                  <motion.div
+                    className="absolute inset-1 rounded-full border border-[#eebee2]/80"
+                    style={{
+                      boxShadow: "0 0 30px rgba(195,140,255,0.35)",
+                    }}
+                    animate={{ opacity: [0.5, 0.9, 0.5] }}
+                    transition={{ duration: 2.8, repeat: Infinity, ease: "easeInOut" }}
+                  />
+
+                  {/* Scanning line */}
+                  <motion.div
+                    className="absolute left-1/2 top-2 h-1 w-40 -translate-x-1/2 rounded-full bg-gradient-to-r from-transparent via-white/80 to-transparent"
+                    animate={{ y: [0, 300, 0], opacity: [0.2, 0.9, 0.2] }}
+                    transition={{ duration: 3, repeat: Infinity, ease: "easeInOut" }}
+                  />
+
+                  {/* Corner markers */}
+                  {[
+                    "-left-2 top-8",
+                    "-left-2 bottom-8",
+                    "-right-2 top-8",
+                    "-right-2 bottom-8",
+                  ].map((position) => (
+                    <motion.span
+                      key={position}
+                      className={`absolute ${position} h-2 w-2 rounded-full bg-white/95 shadow-[0_0_16px_rgba(255,255,255,0.9)]`}
+                      animate={{ scale: [1, 1.3, 1], opacity: [0.6, 1, 0.6] }}
+                      transition={{ duration: 2, repeat: Infinity, ease: "easeInOut" }}
+                    />
                   ))}
                 </div>
               </div>
 
-              <Button variant="outline" onClick={() => navigate("/dashboard")}>
-                View Dashboard
-              </Button>
-            </GlassCard>
-          </motion.div>
+              {/* Close button */}
+              <motion.button
+                onClick={() => setShowCamera(false)}
+                className="absolute top-4 right-4 w-11 h-11 rounded-full bg-black/50 hover:bg-black/70 text-white border border-white/30 flex items-center justify-center transition-all backdrop-blur-md"
+                whileHover={{ scale: 1.1 }}
+                whileTap={{ scale: 0.95 }}
+                aria-label="Close camera"
+              >
+                <X size={20} />
+              </motion.button>
 
-          <motion.div
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.5, delay: 0.2 }}
-            className="mb-8"
-          >
-            <GlassCard className="p-2 bg-white/80 border border-[#f3d4b8]/50">
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-                {tabs.map((tab) => (
-                  <button
-                    key={tab.id}
-                    onClick={() => setActiveTab(tab.id)}
-                    className={`flex flex-col items-center gap-2 py-4 px-2 rounded-xl transition-all ${
-                      activeTab === tab.id
-                        ? "bg-gradient-to-r from-[#ff8a7a] to-[#f2b8a0] text-white shadow-lg"
-                        : "text-gray-700 hover:bg-[#fff5eb]"
-                    }`}
-                  >
-                    <tab.icon className="w-6 h-6" />
-                    <span className="text-sm text-center font-semibold">
-                      {tab.label}
-                    </span>
-                  </button>
-                ))}
-              </div>
-            </GlassCard>
-          </motion.div>
-
-          <motion.div
-            key={activeTab}
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.5 }}
-          >
-            <GlassCard className="bg-white/80 border border-[#f3d4b8]/50">
-              {activeTab === "personal" && (
-                <div>
-                  <h3 className="text-2xl text-gray-800 mb-6 flex items-center gap-2 font-bold">
-                    <User className="w-6 h-6 text-[#cc5f57]" />
-                    Personal Information
-                  </h3>
-
-                  <div className="mb-4 p-3 bg-[#fff5eb] border border-[#f3d4b8] rounded-xl flex items-start gap-2">
-                    <AlertCircle className="w-4 h-4 text-[#cc5f57] flex-shrink-0 mt-0.5" />
-                    <p className="text-xs text-gray-600">
-                      These values are loaded from the backend and refreshed
-                      after save.
-                    </p>
-                  </div>
-
-                  {loadingProfile ? (
-                    <div className="py-10 text-center text-gray-500">
-                      Loading profile...
-                    </div>
-                  ) : (
-                    <div className="space-y-4">
-                      <div className="grid md:grid-cols-2 gap-4">
-                        <Input
-                          label="First Name"
-                          type="text"
-                          value={personalInfo.firstName}
-                          onChange={(e) =>
-                            setPersonalInfo((prev) => ({
-                              ...prev,
-                              firstName: e.target.value,
-                            }))
-                          }
-                        />
-                        <Input
-                          label="Last Name"
-                          type="text"
-                          value={personalInfo.lastName}
-                          onChange={(e) =>
-                            setPersonalInfo((prev) => ({
-                              ...prev,
-                              lastName: e.target.value,
-                            }))
-                          }
-                        />
-                      </div>
-
-                      <div className="grid md:grid-cols-2 gap-4">
-                        <Input
-                          label="Email"
-                          type="email"
-                          value={personalInfo.email}
-                          onChange={(e) =>
-                            setPersonalInfo((prev) => ({
-                              ...prev,
-                              email: e.target.value,
-                            }))
-                          }
-                        />
-                        <Input
-                          label="Username"
-                          type="text"
-                          value={personalInfo.username}
-                          onChange={(e) =>
-                            setPersonalInfo((prev) => ({
-                              ...prev,
-                              username: e.target.value,
-                            }))
-                          }
-                        />
-                      </div>
-
-                      <div className="grid md:grid-cols-2 gap-4">
-                        <Input
-                          label="Phone"
-                          type="tel"
-                          value={personalInfo.phone}
-                          onChange={(e) =>
-                            setPersonalInfo((prev) => ({
-                              ...prev,
-                              phone: e.target.value,
-                            }))
-                          }
-                        />
-                        <Input
-                          label="Birthday"
-                          type="date"
-                          value={personalInfo.birthday}
-                          onChange={(e) =>
-                            setPersonalInfo((prev) => ({
-                              ...prev,
-                              birthday: e.target.value,
-                            }))
-                          }
-                        />
-                      </div>
-
-                      <div className="relative">
-                        <label className="block text-sm mb-2 text-gray-700 font-semibold">
-                          Address
-                        </label>
-                        <textarea
-                          value={personalInfo.address}
-                          onChange={(e) =>
-                            setPersonalInfo((prev) => ({
-                              ...prev,
-                              address: e.target.value,
-                            }))
-                          }
-                          className="w-full px-4 py-3 rounded-xl bg-white/50 backdrop-blur-sm border border-purple-200 focus:border-[#8b63d3] focus:outline-none focus:ring-2 focus:ring-[#8b63d3]/20 transition-all resize-none"
-                          rows={3}
-                          placeholder="Your address..."
-                        />
-                      </div>
-
-                      {(claims.sub || claims.email_verified !== undefined) && (
-                        <div className="p-4 bg-gray-50 rounded-xl border border-gray-200 space-y-2">
-                          <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">
-                            Keycloak Account Info
-                          </p>
-
-                          {claims.sub && (
-                            <div className="flex items-center gap-2 text-xs text-gray-600">
-                              <Key className="w-3 h-3" />
-                              <span>
-                                User ID :{" "}
-                                <code className="bg-gray-100 px-1 rounded">
-                                  {claims.sub}
-                                </code>
-                              </span>
-                            </div>
-                          )}
-
-                          {claims.email_verified !== undefined && (
-                            <div className="flex items-center gap-2 text-xs">
-                              <CheckCircle
-                                className={`w-3 h-3 ${
-                                  claims.email_verified
-                                    ? "text-green-500"
-                                    : "text-red-500"
-                                }`}
-                              />
-                              <span
-                                className={
-                                  claims.email_verified
-                                    ? "text-green-600"
-                                    : "text-red-600"
-                                }
-                              >
-                                Email{" "}
-                                {claims.email_verified
-                                  ? "verified"
-                                  : "not verified"}
-                              </span>
-                            </div>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {activeTab === "skin" && (
-                <div>
-                  <h3 className="text-2xl text-gray-800 mb-6 flex items-center gap-2 font-bold">
-                    <Heart className="w-6 h-6 text-[#cc5f57]" />
-                    Skin Preferences
-                  </h3>
-
-                  <div className="mb-4 p-3 bg-[#fff5eb] border border-[#f3d4b8] rounded-xl flex items-start gap-2">
-                    <AlertCircle className="w-4 h-4 text-[#cc5f57] flex-shrink-0 mt-0.5" />
-                    <p className="text-xs text-gray-600">
-                      These values are loaded from your questionnaire and can be
-                      updated here using the same structure and options.
-                    </p>
-                  </div>
-
-                  {loadingSkinPrefs ? (
-                    <div className="py-10 text-center text-gray-500">
-                      Loading skin preferences...
-                    </div>
-                  ) : (
-                    <div className="space-y-8">
-                      <div>
-                        <label className="block text-gray-700 mb-4 font-semibold">
-                          What is your skin type?
-                        </label>
-                        <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-                          {skinTypes.map((type) => (
-                            <motion.button
-                              key={type}
-                              type="button"
-                              onClick={() =>
-                                setSkinPreferences((prev) => ({
-                                  ...prev,
-                                  skinType: type,
-                                }))
-                              }
-                              className={`p-4 rounded-xl border-2 transition-all ${
-                                skinPreferences.skinType === type
-                                  ? "border-[#cc5f57] bg-[#cc5f57] text-white"
-                                  : "border-[#f3d4b8] bg-white/50 text-gray-700 hover:border-[#cc5f57]"
-                              }`}
-                              whileHover={{ scale: 1.03 }}
-                              whileTap={{ scale: 0.97 }}
-                            >
-                              {type}
-                            </motion.button>
-                          ))}
-                        </div>
-                      </div>
-
-                      <div>
-                        <label className="block text-gray-700 mb-4 font-semibold">
-                          How sensitive is your skin?
-                        </label>
-                        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                          {sensitivityLevels.map((level) => (
-                            <motion.button
-                              key={level}
-                              type="button"
-                              onClick={() =>
-                                setSkinPreferences((prev) => ({
-                                  ...prev,
-                                  sensitivityLevel: level,
-                                }))
-                              }
-                              className={`p-4 rounded-xl border-2 transition-all ${
-                                skinPreferences.sensitivityLevel === level
-                                  ? "border-[#cc5f57] bg-[#cc5f57] text-white"
-                                  : "border-[#f3d4b8] bg-white/50 text-gray-700 hover:border-[#cc5f57]"
-                              }`}
-                              whileHover={{ scale: 1.03 }}
-                              whileTap={{ scale: 0.97 }}
-                            >
-                              {level}
-                            </motion.button>
-                          ))}
-                        </div>
-                      </div>
-
-                      <div>
-                        <label className="block text-gray-700 mb-4 font-semibold">
-                          What symptoms are you experiencing? (Select all that
-                          apply)
-                        </label>
-                        <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-                          {symptomsOptions.map((symptom) => (
-                            <motion.button
-                              key={symptom}
-                              type="button"
-                              onClick={() =>
-                                toggleQuestionnaireArray("symptoms", symptom)
-                              }
-                              className={`p-4 rounded-xl border-2 transition-all ${
-                                skinPreferences.symptoms.includes(symptom)
-                                  ? "border-[#cc5f57] bg-[#cc5f57] text-white"
-                                  : "border-[#f3d4b8] bg-white/50 text-gray-700 hover:border-[#cc5f57]"
-                              }`}
-                              whileHover={{ scale: 1.03 }}
-                              whileTap={{ scale: 0.97 }}
-                            >
-                              {symptom}
-                            </motion.button>
-                          ))}
-                        </div>
-                      </div>
-
-                      <div>
-                        <label className="block text-gray-700 mb-4 font-semibold">
-                          Which areas are affected? (Select all that apply)
-                        </label>
-                        <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-                          {affectedAreasOptions.map((area) => (
-                            <motion.button
-                              key={area}
-                              type="button"
-                              onClick={() =>
-                                toggleQuestionnaireArray("affectedAreas", area)
-                              }
-                              className={`p-4 rounded-xl border-2 transition-all ${
-                                skinPreferences.affectedAreas.includes(area)
-                                  ? "border-[#cc5f57] bg-[#cc5f57] text-white"
-                                  : "border-[#f3d4b8] bg-white/50 text-gray-700 hover:border-[#cc5f57]"
-                              }`}
-                              whileHover={{ scale: 1.03 }}
-                              whileTap={{ scale: 0.97 }}
-                            >
-                              {area}
-                            </motion.button>
-                          ))}
-                        </div>
-                      </div>
-
-                      <div>
-                        <label className="block text-gray-700 mb-4 font-semibold">
-                          What are your main skin concerns? (Select all that
-                          apply)
-                        </label>
-                        <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-                          {concernsOptions.map((concern) => (
-                            <motion.button
-                              key={concern}
-                              type="button"
-                              onClick={() =>
-                                toggleQuestionnaireArray("concerns", concern)
-                              }
-                              className={`p-4 rounded-xl border-2 transition-all ${
-                                skinPreferences.concerns.includes(concern)
-                                  ? "border-[#cc5f57] bg-[#cc5f57] text-white"
-                                  : "border-[#f3d4b8] bg-white/50 text-gray-700 hover:border-[#cc5f57]"
-                              }`}
-                              whileHover={{ scale: 1.03 }}
-                              whileTap={{ scale: 0.97 }}
-                            >
-                              {concern}
-                            </motion.button>
-                          ))}
-                        </div>
-                      </div>
-
-                      <div>
-                        <label className="block text-gray-700 mb-4 font-semibold">
-                          Since when do you have this issue?
-                        </label>
-                        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                          {durationsOptions.map((item) => (
-                            <motion.button
-                              key={item}
-                              type="button"
-                              onClick={() =>
-                                setSkinPreferences((prev) => ({
-                                  ...prev,
-                                  duration: item,
-                                }))
-                              }
-                              className={`p-4 rounded-xl border-2 transition-all ${
-                                skinPreferences.duration === item
-                                  ? "border-[#cc5f57] bg-[#cc5f57] text-white"
-                                  : "border-[#f3d4b8] bg-white/50 text-gray-700 hover:border-[#cc5f57]"
-                              }`}
-                              whileHover={{ scale: 1.03 }}
-                              whileTap={{ scale: 0.97 }}
-                            >
-                              {item}
-                            </motion.button>
-                          ))}
-                        </div>
-                      </div>
-
-                      <div>
-                        <label className="block text-gray-700 mb-4 font-semibold">
-                          How severe is the condition?
-                        </label>
-                        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                          {severityOptions.map((level) => (
-                            <motion.button
-                              key={level}
-                              type="button"
-                              onClick={() =>
-                                setSkinPreferences((prev) => ({
-                                  ...prev,
-                                  severity: level,
-                                }))
-                              }
-                              className={`p-4 rounded-xl border-2 transition-all ${
-                                skinPreferences.severity === level
-                                  ? "border-[#cc5f57] bg-[#cc5f57] text-white"
-                                  : "border-[#f3d4b8] bg-white/50 text-gray-700 hover:border-[#cc5f57]"
-                              }`}
-                              whileHover={{ scale: 1.03 }}
-                              whileTap={{ scale: 0.97 }}
-                            >
-                              {level}
-                            </motion.button>
-                          ))}
-                        </div>
-                      </div>
-
-                      <div>
-                        <label className="block text-gray-700 mb-4 font-semibold">
-                          What factors seem to make it worse? (Select all that
-                          apply)
-                        </label>
-                        <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-                          {triggersOptions.map((trigger) => (
-                            <motion.button
-                              key={trigger}
-                              type="button"
-                              onClick={() =>
-                                toggleQuestionnaireArray("triggers", trigger)
-                              }
-                              className={`p-4 rounded-xl border-2 transition-all ${
-                                skinPreferences.triggers.includes(trigger)
-                                  ? "border-[#cc5f57] bg-[#cc5f57] text-white"
-                                  : "border-[#f3d4b8] bg-white/50 text-gray-700 hover:border-[#cc5f57]"
-                              }`}
-                              whileHover={{ scale: 1.03 }}
-                              whileTap={{ scale: 0.97 }}
-                            >
-                              {trigger}
-                            </motion.button>
-                          ))}
-                        </div>
-                      </div>
-
-                      <div>
-                        <label className="block text-gray-700 mb-4 font-semibold">
-                          Do you have any allergies or sensitivities?
-                        </label>
-                        <textarea
-                          className="w-full px-4 py-3 rounded-xl bg-white/50 backdrop-blur-sm border border-purple-200 focus:border-[#8b63d3] focus:outline-none focus:ring-2 focus:ring-[#8b63d3]/20 transition-all resize-none"
-                          rows={3}
-                          placeholder="Example: fragrance, retinol, acids, certain ingredients..."
-                          value={skinPreferences.allergies}
-                          onChange={(e) =>
-                            setSkinPreferences((prev) => ({
-                              ...prev,
-                              allergies: e.target.value,
-                            }))
-                          }
-                        />
-                      </div>
-
-                      <div>
-                        <label className="block text-gray-700 mb-4 font-semibold">
-                          Do you have any medical history related to skin or
-                          other health conditions?
-                        </label>
-                        <textarea
-                          className="w-full px-4 py-3 rounded-xl bg-white/50 backdrop-blur-sm border border-purple-200 focus:border-[#8b63d3] focus:outline-none focus:ring-2 focus:ring-[#8b63d3]/20 transition-all resize-none"
-                          rows={3}
-                          placeholder="Example: eczema, psoriasis, rosacea, hormonal imbalance, diabetes, thyroid issues..."
-                          value={skinPreferences.medicalHistory}
-                          onChange={(e) =>
-                            setSkinPreferences((prev) => ({
-                              ...prev,
-                              medicalHistory: e.target.value,
-                            }))
-                          }
-                        />
-                      </div>
-
-                      <div>
-                        <label className="block text-gray-700 mb-4 font-semibold">
-                          Describe your current skincare routine
-                        </label>
-                        <textarea
-                          className="w-full px-4 py-3 rounded-xl bg-white/50 backdrop-blur-sm border border-purple-200 focus:border-[#8b63d3] focus:outline-none focus:ring-2 focus:ring-[#8b63d3]/20 transition-all resize-none"
-                          rows={3}
-                          placeholder="Example: cleanser, moisturizer, serum, sunscreen, exfoliant..."
-                          value={skinPreferences.skincareRoutine}
-                          onChange={(e) =>
-                            setSkinPreferences((prev) => ({
-                              ...prev,
-                              skincareRoutine: e.target.value,
-                            }))
-                          }
-                        />
-                      </div>
-
-                      <div className="grid md:grid-cols-2 gap-6">
-                        <div>
-                          <label className="block text-gray-700 mb-4 font-semibold">
-                            How often do you use sunscreen?
-                          </label>
-                          <select
-                            value={skinPreferences.sunscreenUsage}
-                            onChange={(e) =>
-                              setSkinPreferences((prev) => ({
-                                ...prev,
-                                sunscreenUsage: e.target.value,
-                              }))
-                            }
-                            className="w-full px-4 py-3 rounded-xl bg-white/50 border border-purple-200 focus:border-[#8b63d3] focus:outline-none focus:ring-2 focus:ring-[#8b63d3]/20"
-                          >
-                            <option value="">Select an option</option>
-                            {sunscreenOptions.map((item) => (
-                              <option key={item} value={item}>
-                                {item}
-                              </option>
-                            ))}
-                          </select>
-                        </div>
-
-                        <div>
-                          <label className="block text-gray-700 mb-4 font-semibold">
-                            Stress level
-                          </label>
-                          <select
-                            value={skinPreferences.stressLevel}
-                            onChange={(e) =>
-                              setSkinPreferences((prev) => ({
-                                ...prev,
-                                stressLevel: e.target.value,
-                              }))
-                            }
-                            className="w-full px-4 py-3 rounded-xl bg-white/50 border border-purple-200 focus:border-[#8b63d3] focus:outline-none focus:ring-2 focus:ring-[#8b63d3]/20"
-                          >
-                            <option value="">Select an option</option>
-                            {stressOptions.map((item) => (
-                              <option key={item} value={item}>
-                                {item}
-                              </option>
-                            ))}
-                          </select>
-                        </div>
-
-                        <div>
-                          <label className="block text-gray-700 mb-4 font-semibold">
-                            Sleep quality
-                          </label>
-                          <select
-                            value={skinPreferences.sleepQuality}
-                            onChange={(e) =>
-                              setSkinPreferences((prev) => ({
-                                ...prev,
-                                sleepQuality: e.target.value,
-                              }))
-                            }
-                            className="w-full px-4 py-3 rounded-xl bg-white/50 border border-purple-200 focus:border-[#8b63d3] focus:outline-none focus:ring-2 focus:ring-[#8b63d3]/20"
-                          >
-                            <option value="">Select an option</option>
-                            {sleepOptions.map((item) => (
-                              <option key={item} value={item}>
-                                {item}
-                              </option>
-                            ))}
-                          </select>
-                        </div>
-
-                        <div>
-                          <label className="block text-gray-700 mb-4 font-semibold">
-                            Daily water intake
-                          </label>
-                          <select
-                            value={skinPreferences.waterIntake}
-                            onChange={(e) =>
-                              setSkinPreferences((prev) => ({
-                                ...prev,
-                                waterIntake: e.target.value,
-                              }))
-                            }
-                            className="w-full px-4 py-3 rounded-xl bg-white/50 border border-purple-200 focus:border-[#8b63d3] focus:outline-none focus:ring-2 focus:ring-[#8b63d3]/20"
-                          >
-                            <option value="">Select an option</option>
-                            {waterOptions.map((item) => (
-                              <option key={item} value={item}>
-                                {item}
-                              </option>
-                            ))}
-                          </select>
-                        </div>
-                      </div>
-
-                      <div className="bg-[#fff5eb] rounded-xl p-4 flex items-start gap-3 border border-[#f3d4b8]/70">
-                        <AlertCircle className="w-5 h-5 text-[#cc5f57] flex-shrink-0 mt-0.5" />
-                        <p className="text-sm text-gray-700">
-                          These preferences are synchronized with your saved
-                          questionnaire and can be updated here using the same
-                          values and questions.
-                        </p>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {activeTab === "security" && (
-                <div className="space-y-8">
-                  <div>
-                    <h3 className="text-2xl text-gray-800 mb-4 flex items-center gap-2 font-bold">
-                      <Shield className="w-6 h-6 text-[#cc5f57]" />
-                      Account Security
-                    </h3>
-
-                    <div className="p-4 bg-blue-50 border border-blue-200 rounded-xl">
-                      <div className="flex items-start gap-3 mb-4">
-                        <Lock className="w-5 h-5 text-blue-600 flex-shrink-0 mt-0.5" />
-                        <div>
-                          <p className="text-sm font-semibold text-blue-800 mb-1">
-                            Change Password
-                          </p>
-                          <p className="text-sm text-blue-700">
-                            Update your password securely from this page.
-                          </p>
-                        </div>
-                      </div>
-
-                      <div className="space-y-4">
-                        <Input
-                          label="Current Password"
-                          type="password"
-                          value={currentPassword}
-                          onChange={(e) => setCurrentPassword(e.target.value)}
-                        />
-
-                        <Input
-                          label="New Password"
-                          type="password"
-                          value={newPassword}
-                          onChange={(e) => setNewPassword(e.target.value)}
-                        />
-
-                        <Input
-                          label="Confirm New Password"
-                          type="password"
-                          value={confirmPassword}
-                          onChange={(e) => setConfirmPassword(e.target.value)}
-                        />
-
-                        {passwordError && (
-                          <p className="text-sm text-red-600 font-medium">
-                            {passwordError}
-                          </p>
-                        )}
-
-                        {passwordSuccess && (
-                          <p className="text-sm text-green-600 font-medium">
-                            {passwordSuccess}
-                          </p>
-                        )}
-
-                        <Button
-                          onClick={handleChangePassword}
-                          disabled={passwordLoading}
-                          className="bg-blue-600 hover:bg-blue-700 text-white flex items-center gap-2"
-                        >
-                          <Key className="w-4 h-4" />
-                          {passwordLoading ? "Updating..." : "Update Password"}
-                        </Button>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="border-t border-purple-200 pt-8">
-                    <h3 className="text-xl text-gray-800 mb-4 flex items-center gap-2 font-bold">
-                      <Lock className="w-5 h-5 text-[#cc5f57]" />
-                      Data Encryption & Security
-                    </h3>
-                    <div className="space-y-4">
-                      <GlassCard className="bg-gradient-to-r from-blue-50 to-cyan-50 border-2 border-blue-200">
-                        <div className="flex items-start gap-4">
-                          <div className="w-12 h-12 rounded-full bg-gradient-to-br from-blue-500 to-cyan-500 flex items-center justify-center flex-shrink-0">
-                            <FileKey className="w-6 h-6 text-white" />
-                          </div>
-                          <div>
-                            <h4 className="font-bold text-gray-800 mb-2">
-                              AES-256 Encryption
-                            </h4>
-                            <p className="text-sm text-gray-600 mb-3">
-                              All your personal data, skin analysis results, and
-                              facial images are encrypted both in transit and at
-                              rest.
-                            </p>
-                            <div className="flex items-center gap-2 text-emerald-600">
-                              <CheckCircle className="w-4 h-4" />
-                              <span className="text-xs font-semibold">
-                                Your data is fully encrypted
-                              </span>
-                            </div>
-                          </div>
-                        </div>
-                      </GlassCard>
-
-                      <div className="grid md:grid-cols-2 gap-4">
-                        <div className="p-4 rounded-xl bg-white/50 border border-purple-200">
-                          <div className="flex items-center gap-3 mb-2">
-                            <Server className="w-5 h-5 text-[#cc5f57]" />
-                            <h5 className="font-semibold text-gray-800">
-                              Secure Storage
-                            </h5>
-                          </div>
-                          <p className="text-sm text-gray-600">
-                            Data stored on secure servers with regular security
-                            audits.
-                          </p>
-                        </div>
-                        <div className="p-4 rounded-xl bg-white/50 border border-purple-200">
-                          <div className="flex items-center gap-3 mb-2">
-                            <Globe className="w-5 h-5 text-[#cc5f57]" />
-                            <h5 className="font-semibold text-gray-800">
-                              SSL/TLS Protection
-                            </h5>
-                          </div>
-                          <p className="text-sm text-gray-600">
-                            All connections use SSL/TLS encryption.
-                          </p>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="border-t border-purple-200 pt-8">
-                    <h3 className="text-xl text-gray-800 mb-4 flex items-center gap-2 font-bold">
-                      <ShieldCheck className="w-5 h-5 text-[#cc5f57]" />
-                      Privacy Assurance
-                    </h3>
-                    <div className="space-y-3">
-                      {[
-                        "We never sell your personal data to third parties",
-                        "Your facial images are used only for AI analysis and are never shared",
-                        "You have full control over your data and can delete it anytime",
-                        "We comply with GDPR, CCPA, and international privacy laws",
-                        "Anonymous analytics only",
-                      ].map((text, index) => (
-                        <div
-                          key={index}
-                          className="flex items-start gap-3 p-3 rounded-lg bg-emerald-50"
-                        >
-                          <CheckCircle className="w-5 h-5 text-emerald-600 flex-shrink-0 mt-0.5" />
-                          <p className="text-sm text-gray-700">{text}</p>
-                        </div>
-                      ))}
-                    </div>
-
-                    <div className="mt-4 p-4 bg-purple-50 rounded-xl border border-purple-200">
-                      <div className="flex items-start gap-3">
-                        <Database className="w-5 h-5 text-[#cc5f57] flex-shrink-0 mt-0.5" />
-                        <div>
-                          <h5 className="font-semibold text-gray-800 mb-2">
-                            What Data We Collect
-                          </h5>
-                          <ul className="text-sm text-gray-600 space-y-1">
-                            <li>• Account information</li>
-                            <li>• Facial images for skin analysis</li>
-                            <li>• Skin health data and progress tracking</li>
-                            <li>• Product purchase history</li>
-                            <li>• App usage analytics</li>
-                          </ul>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="border-t border-red-200 pt-8">
-                    <h3 className="text-xl text-gray-800 mb-4 flex items-center gap-2 font-bold">
-                      <AlertTriangle className="w-5 h-5 text-red-600" />
-                      Danger Zone
-                    </h3>
-                    <GlassCard className="bg-red-50/50 border-2 border-red-200">
-                      <div className="flex items-start justify-between gap-4">
-                        <div className="flex-1">
-                          <h4 className="font-bold text-gray-800 mb-2">
-                            Delete My Account
-                          </h4>
-                          <p className="text-sm text-gray-600 mb-2">
-                            Permanently delete your account and all associated
-                            data.
-                          </p>
-                        </div>
-                        <Button
-                          onClick={() => setShowDeleteModal(true)}
-                          className="bg-red-600 hover:bg-red-700 text-white flex items-center gap-2 whitespace-nowrap"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                          Delete Account
-                        </Button>
-                      </div>
-                    </GlassCard>
-                  </div>
-                </div>
-              )}
-
-              {activeTab === "notifications" && (
-                <div>
-                  <h3 className="text-2xl text-gray-800 mb-6 flex items-center gap-2 font-bold">
-                    <Bell className="w-6 h-6 text-[#cc5f57]" />
-                    Notification Preferences
-                  </h3>
-                  <div className="space-y-4">
-                    {[
-                      {
-                        title: "Routine Reminders",
-                        description:
-                          "Get reminders for your daily skincare routine",
-                        checked: true,
-                      },
-                      {
-                        title: "Product Recommendations",
-                        description:
-                          "Receive personalized product suggestions",
-                        checked: true,
-                      },
-                      {
-                        title: "Order Updates",
-                        description: "Track your orders and shipping status",
-                        checked: true,
-                      },
-                      {
-                        title: "Promotional Emails",
-                        description:
-                          "Special offers and exclusive discounts",
-                        checked: false,
-                      },
-                      {
-                        title: "Skin Progress Reports",
-                        description:
-                          "Weekly insights about your skin improvement",
-                        checked: true,
-                      },
-                    ].map((item, index) => (
-                      <div
-                        key={index}
-                        className="flex items-start justify-between p-4 rounded-xl bg-white/30"
-                      >
-                        <div className="flex-1">
-                          <p className="text-gray-800 mb-1 font-semibold">
-                            {item.title}
-                          </p>
-                          <p className="text-sm text-gray-600">
-                            {item.description}
-                          </p>
-                        </div>
-                        <label className="relative inline-flex items-center cursor-pointer ml-4">
-                          <input
-                            type="checkbox"
-                            defaultChecked={item.checked}
-                            className="sr-only peer"
-                          />
-                          <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-[#8b63d3]/20 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-[#8b63d3]"></div>
-                        </label>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              <div className="mt-8 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-                <div>
-                  <AnimatePresence>
-                    {saved && (
-                      <motion.div
-                        initial={{ opacity: 0, x: -20 }}
-                        animate={{ opacity: 1, x: 0 }}
-                        exit={{ opacity: 0 }}
-                        className="flex items-center gap-2 text-green-600"
-                      >
-                        <CheckCircle className="w-5 h-5" />
-                        <span className="text-sm font-semibold">
-                          Changes saved successfully!
-                        </span>
-                      </motion.div>
-                    )}
-                  </AnimatePresence>
-
-                  {error && (
-                    <p className="text-sm text-red-600 font-medium">{error}</p>
-                  )}
-                </div>
-
+              {/* Action buttons */}
+              <motion.div
+                className="flex flex-col sm:flex-row gap-4 mt-6 justify-center"
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: 0.2 }}
+              >
                 <Button
+                  onClick={capturePhoto}
+                  className="sm:w-auto px-8 h-12 bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-600 hover:to-teal-600"
                   glow
-                  onClick={handleSave}
-                  disabled={loading || loadingProfile || loadingSkinPrefs}
-                  className="ml-auto flex items-center gap-2"
                 >
-                  <Save className="w-5 h-5" />
-                  {loading ? "Saving..." : "Save Changes"}
+                  📷 Capture Photo
                 </Button>
-              </div>
-            </GlassCard>
-          </motion.div>
-        </div>
-      </div>
-
-      <AnimatePresence>
-        {showDeleteModal && (
-          <>
-            <motion.div
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              onClick={() => setShowDeleteModal(false)}
-              className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50"
-            />
-            <motion.div
-              initial={{ opacity: 0, scale: 0.9 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.9 }}
-              className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-md z-50"
-            >
-              <GlassCard className="bg-white border-2 border-red-200">
-                <div className="flex items-center gap-3 mb-4">
-                  <div className="w-12 h-12 rounded-full bg-red-100 flex items-center justify-center">
-                    <AlertTriangle className="w-6 h-6 text-red-600" />
-                  </div>
-                  <h3 className="text-xl font-bold text-gray-800">
-                    Delete Account
-                  </h3>
-                </div>
-
-                <div className="mb-6">
-                  <p className="text-gray-700 mb-4">
-                    Are you sure you want to delete your account? This action is{" "}
-                    <strong>permanent</strong>.
-                  </p>
-                  <p className="text-sm text-gray-600 mb-4">
-                    To confirm, type <strong>DELETE</strong> below:
-                  </p>
-                  <Input
-                    type="text"
-                    placeholder="Type DELETE to confirm"
-                    value={deleteConfirmation}
-                    onChange={(e) => setDeleteConfirmation(e.target.value)}
-                    className="font-mono"
-                  />
-                </div>
-
-                <div className="flex gap-3">
-                  <Button
-                    variant="outline"
-                    onClick={() => {
-                      setShowDeleteModal(false);
-                      setDeleteConfirmation("");
-                    }}
-                    className="flex-1"
-                  >
-                    Cancel
-                  </Button>
-                  <Button
-                    onClick={handleDeleteAccount}
-                    disabled={deleteConfirmation !== "DELETE"}
-                    className={`flex-1 ${
-                      deleteConfirmation === "DELETE"
-                        ? "bg-red-600 hover:bg-red-700"
-                        : "bg-gray-400 cursor-not-allowed"
-                    } text-white`}
-                  >
-                    Delete Permanently
-                  </Button>
-                </div>
-              </GlassCard>
+                <Button
+                  onClick={() => setShowCamera(false)}
+                  variant="secondary"
+                  className="sm:w-auto px-8 h-12"
+                >
+                  Cancel
+                </Button>
+              </motion.div>
             </motion.div>
-          </>
+          </motion.div>
         )}
-      </AnimatePresence>
+
+      </div>
     </PageTransition>
   );
 }
+

@@ -1,340 +1,630 @@
-import { useRef } from "react";
+import { useState, ChangeEvent, useRef, useEffect, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
-import { motion, useScroll, useTransform } from "motion/react";
-import { Sparkles, Check, ArrowRight, Zap, Clock, Heart } from "lucide-react";
+import Webcam from "react-webcam";
+
+
 import { Button } from "../components/Button";
+import { GlassCard } from "../components/GlassCard";
+import { ProgressIndicator } from "../components/ProgressIndicator";
 import { PageTransition } from "../components/PageTransition";
-import { Interactive3DOrb } from "../components/Interactive3DOrb";
-import { ImageWithFallback } from "../components/figma/ImageWithFallback";
-import { useLanguage } from "../contexts/LanguageContext";
+import { ScannerCore } from "../components/ScannerCore";
+import { ScannerActions } from "../components/ScannerActions";
 
-const FACE_PORTRAIT_URL = "/src/assets/face-portrait.png";
+import { motion, AnimatePresence } from "motion/react";
+import { Upload, AlertCircle, X, Crown, Camera, Info } from "lucide-react";
+import { useAuth } from "../contexts/AuthContext";
+import { http } from "../api/http";
+import { usePhotoLimit } from "../../hooks/useFeatureAccess";
+import { toast } from "sonner";
 
-export function LandingPage() {
+const cameraCrystal = new URL("../../assets/hd_restoration_result_image.png", import.meta.url).href;
+
+export function UploadPage() {
   const navigate = useNavigate();
-  const { t } = useLanguage();
-  const containerRef = useRef<HTMLDivElement | null>(null);
+  const { token, isAuthenticated, isInitialized, login, refreshNow } = useAuth();
+  const { maxPhotos } = usePhotoLimit();
 
-  const { scrollYProgress } = useScroll({
-    target: containerRef,
-    offset: ["start start", "end end"],
-  });
+  const [uploading, setUploading] = useState(false);
+  const [files, setFiles] = useState<File[]>([]);
+  const [showCamera, setShowCamera] = useState(false);
+  const [isCentered, setIsCentered] = useState(false);
+  const isLimitReached = files.length >= maxPhotos;
 
-  const opacity = useTransform(scrollYProgress, [0, 0.5], [1, 0.8]);
-  const scale = useTransform(scrollYProgress, [0, 0.3], [1, 0.95]);
+  const webcamRef = useRef<Webcam | null>(null);
+
+  // 🔊 SOUND FIX (UNLOCK AFTER USER CLICK)
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+
+  const initSound = () => {
+    if (!audioRef.current) {
+      audioRef.current = new Audio("/beep.mp3");
+
+      // unlock audio (browser requirement)
+      audioRef.current
+        .play()
+        .then(() => {
+          audioRef.current?.pause();
+          if (audioRef.current) audioRef.current.currentTime = 0;
+        })
+        .catch(() => {});
+    }
+  };
+
+  const playSound = () => {
+    if (audioRef.current) {
+      audioRef.current.currentTime = 0;
+      audioRef.current.play().catch(() => {});
+    }
+  };
+
+  const previewUrls = useMemo(
+    () => files.map((file) => URL.createObjectURL(file)),
+    [files],
+  );
+
+  useEffect(() => {
+    return () => {
+      previewUrls.forEach((url) => URL.revokeObjectURL(url));
+    };
+  }, [previewUrls]);
+
+  // 📂 Upload
+  const handleFileChange = (e: ChangeEvent<HTMLInputElement>) => {
+    if (!e.target.files) return;
+
+    const incomingFiles = Array.from(e.target.files);
+    const newFiles = incomingFiles.filter((file) => file.type.startsWith("image/"));
+    const remainingSlots = maxPhotos - files.length;
+
+    if (newFiles.length !== incomingFiles.length) {
+      toast.error("Only image files are allowed");
+    }
+
+    if (remainingSlots === 0) {
+      toast.error(`Max ${maxPhotos} images reached`);
+      return;
+    }
+
+    setFiles((prev) => [...prev, ...newFiles.slice(0, remainingSlots)]);
+  };
+
+  // ❌ remove
+  const removeFile = (index: number) => {
+    setFiles((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  // 📸 capture
+  const capturePhoto = () => {
+    if (files.length >= maxPhotos) {
+      toast.error(`Max ${maxPhotos} images reached`);
+      return;
+    }
+
+    if (!webcamRef.current) return;
+
+    const imageSrc = webcamRef.current.getScreenshot();
+    if (!imageSrc) return;
+
+    const byteString = atob(imageSrc.split(",")[1]);
+    const mimeString = imageSrc.split(",")[0].split(":")[1].split(";")[0];
+
+    const ab = new ArrayBuffer(byteString.length);
+    const ia = new Uint8Array(ab);
+
+    for (let i = 0; i < byteString.length; i++) {
+      ia[i] = byteString.charCodeAt(i);
+    }
+
+    const file = new File([ab], "camera.jpg", { type: mimeString });
+
+    setFiles((prev) => [...prev, file].slice(0, maxPhotos));
+    setShowCamera(false);
+  };
+
+  // 🎯 simple center effect (visual only)
+  useEffect(() => {
+    if (!showCamera) return;
+
+    const interval = setInterval(() => {
+      const centered = Math.random() > 0.5;
+
+      setIsCentered(centered);
+
+      if (centered) {
+        playSound();
+      }
+    }, 2000);
+
+    return () => clearInterval(interval);
+  }, [showCamera]);
+
+  // 🚀 analyze
+  const handleAnalyze = async () => {
+    if (!files.length) return toast.error("Upload at least one photo");
+
+    if (!isInitialized) return toast.error("Auth initializing...");
+    if (!isAuthenticated) {
+      login("/upload");
+      return;
+    }
+
+    setUploading(true);
+
+    const formData = new FormData();
+    formData.append("image", files[0]);
+
+    try {
+      await refreshNow();
+
+      const API = (import.meta.env.VITE_API_URL as string) || "http://localhost:3000";
+      const res = await fetch(`${API}/ai/analyze`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+        body: formData,
+      });
+
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.message || "Error");
+
+      localStorage.setItem("skinAnalysisResult", JSON.stringify(data));
+      navigate("/results");
+    } catch (err: any) {
+      toast.error(err.message);
+    } finally {
+      setUploading(false);
+    }
+  };
 
   return (
-    <PageTransition direction="fade">
-      <motion.div className="min-h-screen deepskyn-3d-page" ref={containerRef} style={{ opacity, scale }}>
-        <span className="deepskyn-3d-shape one" aria-hidden="true" />
-        <span className="deepskyn-3d-shape two" aria-hidden="true" />
-        <span className="deepskyn-3d-shape three" aria-hidden="true" />
+    <PageTransition direction="left">
+      <div className="relative isolate min-h-screen overflow-hidden bg-[#f4edf9] dark:bg-[#1a0f2e] flex items-center justify-center p-4 pt-24 sm:p-6 sm:pt-20">
+        {/* AI BACKGROUND LAYERS */}
+        <div className="pointer-events-none absolute inset-0 z-0">
+          <motion.img
+            src={cameraCrystal}
+            alt=""
+            aria-hidden="true"
+            className="absolute right-[6%] top-[14%] w-[280px] sm:w-[340px] opacity-[0.28] blur-[0.4px]"
+            style={{ filter: "drop-shadow(0 20px 42px rgba(165,103,255,0.28))" }}
+            animate={{ y: [0, -22, 0], x: [0, -16, 0], rotate: [0, 1.8, 0] }}
+            transition={{ duration: 10, repeat: Infinity, ease: "easeInOut" }}
+          />
 
-        <section className="relative min-h-[90vh] flex items-center justify-center overflow-hidden">
-          <div className="absolute inset-0 bg-gradient-to-br from-[#f9dbe6] via-[#f8f0fb] to-[#fff3eb] dark:from-[#2c2132] dark:via-[#241b2e] dark:to-[#241d32]">
-            <div className="absolute top-1/4 left-1/4 w-96 h-96 bg-[#f1a9c2]/30 rounded-full blur-3xl animate-pulse" />
-            <div className="absolute bottom-1/4 right-1/4 w-96 h-96 bg-[#ffd4bc]/30 rounded-full blur-3xl animate-pulse delay-75" />
-          </div>
+          <motion.img
+            src={cameraCrystal}
+            alt=""
+            aria-hidden="true"
+            className="absolute left-[5%] bottom-[8%] w-[190px] sm:w-[240px] opacity-[0.18] scale-x-[-1]"
+            style={{ filter: "drop-shadow(0 14px 36px rgba(165,103,255,0.2))" }}
+            animate={{ y: [0, 16, 0], x: [0, 12, 0], rotate: [0, -1.6, 0] }}
+            transition={{ duration: 12, repeat: Infinity, ease: "easeInOut" }}
+          />
 
-          <div className="relative z-10 max-w-5xl mx-auto px-6 text-center">
-            <div className="deepskyn-hero-shell px-6 py-12 lg:px-12">
-              <motion.div
-                initial={{ opacity: 0, y: -20 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ duration: 0.8 }}
-                className="mb-12"
-              >
-                <h1 className="text-5xl lg:text-6xl font-bold text-[#212437] mb-3 tracking-tight premium-heading">
-                  DeepSkyn
-                </h1>
-                <div className="flex items-center justify-center gap-2">
-                  <Sparkles className="w-4 h-4 text-[#c95785]" />
-                  <p className="text-[#6b5864] text-sm tracking-wide uppercase">{t("landing.poweredByAi")}</p>
-                </div>
-              </motion.div>
+          <div
+            className="absolute inset-0"
+            style={{
+              background:
+                "radial-gradient(1200px 620px at 10% 10%, rgba(249,188,218,0.48), transparent 60%), radial-gradient(980px 560px at 90% 15%, rgba(196,145,255,0.42), transparent 58%), radial-gradient(820px 500px at 50% 92%, rgba(255,201,174,0.36), transparent 58%)",
+            }}
+          />
 
-              <motion.h2
-                initial={{ opacity: 0, y: 20 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ duration: 0.8, delay: 0.2 }}
-                className="text-4xl lg:text-6xl font-bold text-[#1c2235] mb-6 leading-tight premium-heading"
-              >
-                {t("landing.heroTitleTop")}<br />
-                <span className="text-[#b55f82]">{t("landing.heroTitleBottom")}</span>
-              </motion.h2>
+          <motion.div
+            className="absolute -top-28 -left-24 h-[420px] w-[420px] rounded-full bg-[radial-gradient(circle_at_center,rgba(252,197,223,0.62),rgba(252,197,223,0)_70%)] blur-3xl"
+            animate={{ x: [0, 52, 0], y: [0, 30, 0] }}
+            transition={{ duration: 18, repeat: Infinity, ease: "easeInOut" }}
+          />
+          <motion.div
+            className="absolute top-[22%] -right-28 h-[440px] w-[440px] rounded-full bg-[radial-gradient(circle_at_center,rgba(205,171,255,0.52),rgba(205,171,255,0)_70%)] blur-3xl"
+            animate={{ x: [0, -42, 0], y: [0, -26, 0] }}
+            transition={{ duration: 20, repeat: Infinity, ease: "easeInOut" }}
+          />
+          <motion.div
+            className="absolute -bottom-32 left-[24%] h-[420px] w-[420px] rounded-full bg-[radial-gradient(circle_at_center,rgba(255,199,173,0.48),rgba(255,199,173,0)_72%)] blur-3xl"
+            animate={{ x: [0, 36, 0], y: [0, -32, 0] }}
+            transition={{ duration: 22, repeat: Infinity, ease: "easeInOut" }}
+          />
 
-              <motion.p
-                initial={{ opacity: 0, y: 20 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ duration: 0.8, delay: 0.4 }}
-                className="text-lg lg:text-xl text-[#5a5f73] mb-12 max-w-3xl mx-auto leading-relaxed"
-              >
-                {t("landing.heroSubtitle")}
-              </motion.p>
+          <motion.div
+            className="absolute -left-[35%] top-[-20%] h-[180%] w-[55%] rotate-[16deg] opacity-[0.3]"
+            style={{
+              background:
+                "linear-gradient(180deg, rgba(255,255,255,0), rgba(247,189,220,0.94), rgba(196,145,255,0.7), rgba(255,255,255,0))",
+              filter: "blur(42px)",
+            }}
+            animate={{ x: ["0%", "280%"] }}
+            transition={{ duration: 10, repeat: Infinity, ease: "linear" }}
+          />
 
-              <motion.div
-                initial={{ opacity: 0, y: 20 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ duration: 0.8, delay: 0.6 }}
-                className="flex flex-wrap justify-center gap-8 mb-12"
-              >
-                <div className="deepskyn-feature-pill flex flex-col items-center gap-3 px-6 py-5 backdrop-blur-xl border border-white/20 rounded-2xl shadow-lg">
-                  <div className="deepskyn-icon-orb w-16 h-16 backdrop-blur-md flex items-center justify-center rounded-xl border border-white/30">
-                    <Zap className="w-8 h-8 text-[#c95785]" />
-                  </div>
-                  <p className="text-[#344056] dark:text-gray-200 font-medium">{t("landing.smartAnalysis")}</p>
-                </div>
-                <div className="deepskyn-feature-pill flex flex-col items-center gap-3 px-6 py-5 backdrop-blur-xl border border-white/20 rounded-2xl shadow-lg">
-                  <div className="deepskyn-icon-orb w-16 h-16 backdrop-blur-md flex items-center justify-center rounded-xl border border-white/30">
-                    <Clock className="w-8 h-8 text-[#c95785]" />
-                  </div>
-                  <p className="text-[#344056] dark:text-gray-200 font-medium">{t("landing.instantResults")}</p>
-                </div>
-                <div className="deepskyn-feature-pill flex flex-col items-center gap-3 px-6 py-5 backdrop-blur-xl border border-white/20 rounded-2xl shadow-lg">
-                  <div className="deepskyn-icon-orb w-16 h-16 backdrop-blur-md flex items-center justify-center rounded-xl border border-white/30">
-                    <Heart className="w-8 h-8 text-[#c95785]" />
-                  </div>
-                  <p className="text-[#344056] dark:text-gray-200 font-medium">{t("landing.personalizedCare")}</p>
-                </div>
-              </motion.div>
+          {/* Floating AI particles */}
+          <motion.div
+            className="absolute left-[5%] top-[18%] h-36 w-36 rounded-full bg-[radial-gradient(circle_at_30%_30%,rgba(255,218,236,0.98),rgba(255,218,236,0))] blur-2xl"
+            animate={{ x: [0, 78, 0], y: [0, -52, 0], scale: [1, 1.08, 1] }}
+            transition={{ duration: 11, repeat: Infinity, ease: "easeInOut" }}
+          />
+          <motion.div
+            className="absolute right-[7%] top-[30%] h-32 w-32 rounded-full bg-[radial-gradient(circle_at_40%_35%,rgba(210,183,255,0.94),rgba(210,183,255,0))] blur-2xl"
+            animate={{ x: [0, -64, 0], y: [0, 42, 0], scale: [1, 1.1, 1] }}
+            transition={{ duration: 12, repeat: Infinity, ease: "easeInOut" }}
+          />
+          <motion.div
+            className="absolute left-[16%] bottom-[11%] h-28 w-28 rounded-full bg-[radial-gradient(circle_at_center,rgba(255,218,193,0.92),rgba(255,218,193,0))] blur-xl"
+            animate={{ x: [0, 54, 0], y: [0, -34, 0], scale: [1, 1.08, 1] }}
+            transition={{ duration: 10, repeat: Infinity, ease: "easeInOut" }}
+          />
+          <motion.div
+            className="absolute right-[14%] bottom-[16%] h-40 w-40 rounded-full bg-[radial-gradient(circle_at_center,rgba(233,198,255,0.84),rgba(233,198,255,0))] blur-2xl"
+            animate={{ x: [0, -58, 0], y: [0, -40, 0], scale: [1, 1.08, 1] }}
+            transition={{ duration: 14, repeat: Infinity, ease: "easeInOut" }}
+          />
+          {["left-[10%] top-[12%]", "left-[84%] top-[16%]", "left-[78%] top-[72%]", "left-[20%] top-[70%]", "left-[64%] top-[26%]", "left-[35%] top-[82%]"]
+            .map((position, index) => (
+              <motion.span
+                key={position}
+                className={`absolute ${position} h-2.5 w-2.5 rounded-full bg-white/80 shadow-[0_0_18px_rgba(245,183,220,0.72)]`}
+                animate={{ y: [0, -24, 0], x: [0, 8, 0], opacity: [0.4, 1, 0.4] }}
+                transition={{ duration: 4 + index * 0.5, repeat: Infinity, ease: "easeInOut" }}
+              />
+            ))}
 
-              <motion.div
-                initial={{ opacity: 0, y: 20 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ duration: 0.8, delay: 0.8 }}
-              >
-                <button
-                  onClick={() => navigate("/questionnaire")}
-                  className="deepskyn-neo-button group relative px-12 py-5 text-white text-lg font-semibold transition-all duration-300"
-                >
-                  <span className="flex items-center gap-2">
-                    {t("landing.getStarted")}
-                    <Sparkles className="w-5 h-5 group-hover:rotate-12 transition-transform" />
-                  </span>
-                </button>
-              </motion.div>
-            </div>
-          </div>
-        </section>
+          <div
+            className="absolute inset-0 opacity-[0.1] dark:opacity-[0.14]"
+            style={{
+              backgroundImage:
+                "linear-gradient(rgba(139,99,211,0.22) 1px, transparent 1px), linear-gradient(90deg, rgba(139,99,211,0.18) 1px, transparent 1px)",
+              backgroundSize: "52px 52px",
+            }}
+          />
 
-        <section className="max-w-7xl mx-auto px-6 py-14 lg:py-20">
-          <div className="grid lg:grid-cols-[0.98fr_1fr] gap-10 lg:gap-8 items-center">
-            <motion.div initial={{ opacity: 0, y: 20 }} whileInView={{ opacity: 1, y: 0 }} viewport={{ once: true }} className="max-w-xl">
-              <div className="deepskyn-feature-pill mb-6 inline-flex items-center gap-2 px-4 py-2 rounded-full">
-                <Sparkles className="w-4 h-4 text-[#c95785]" />
-                <span className="text-sm text-gray-700 dark:text-gray-300">{t("landing.leftBadge")}</span>
-              </div>
+          <div
+            className="absolute inset-0 opacity-[0.12] dark:opacity-[0.16]"
+            style={{
+              backgroundImage:
+                "radial-gradient(circle at center, rgba(139,99,211,0.35) 1px, transparent 1.2px)",
+              backgroundSize: "30px 30px",
+            }}
+          />
 
-              <h1 className="text-5xl lg:text-6xl mb-6 text-[#11142a] dark:text-white leading-tight premium-heading">
-                {t("landing.leftTitleTop")}<br />
-                <span className="text-[#c95785]">{t("landing.leftTitleBottom")}</span>
-              </h1>
+          <motion.div
+            className="absolute inset-0 opacity-[0.14] dark:opacity-[0.2]"
+            style={{
+              backgroundImage:
+                "repeating-linear-gradient(180deg, rgba(139,99,211,0.3) 0px, rgba(139,99,211,0.3) 1px, transparent 1px, transparent 10px)",
+            }}
+            animate={{ y: [0, 34, 0] }}
+            transition={{ duration: 9, repeat: Infinity, ease: "linear" }}
+          />
+        </div>
 
-              <p className="text-lg text-gray-600 dark:text-gray-300 mb-8 max-w-lg">
-                {t("landing.leftDescription")}
+        <div className="relative z-10 w-full max-w-6xl">
+          {/* Progress bar */}
+          <motion.div
+            initial={{ opacity: 0, y: -20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.6 }}
+            className="mb-12"
+          >
+            <ProgressIndicator currentStep={3} totalSteps={4} />
+          </motion.div>
+
+          {/* Main scanner interface */}
+          <div className="flex flex-col items-center gap-12">
+            {/* Header */}
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.6, delay: 0.1 }}
+              className="text-center space-y-3"
+            >
+              <h2 className="text-3xl md:text-4xl font-semibold text-gray-800 dark:text-white">
+                AI Skin Scanner
+              </h2>
+              <p className="text-gray-500 text-sm md:text-base max-w-xl mx-auto">
+                Upload up to {maxPhotos} clear photos for advanced AI analysis
               </p>
 
-              <div className="flex flex-wrap gap-4 mb-8">
-                <Button glow onClick={() => navigate("/questionnaire")} className="deepskyn-neo-button px-8 py-3">
-                  {t("landing.takeFreeQuiz")}
-                </Button>
-                <Button variant="outline" onClick={() => navigate("/dashboard")} className="deepskyn-surface-card px-8 py-3 border-white/70">
-                  {t("landing.viewScience")}
-                </Button>
+              <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-white/80 border border-[#ead9fb] shadow-[0_10px_24px_rgba(139,99,211,0.08)]">
+                <Crown className="w-4 h-4 text-[#8b63d3]" />
+                <span className="text-sm font-semibold">
+                  {maxPhotos} Image{maxPhotos > 1 ? 's' : ''} Limit
+                </span>
               </div>
+            </motion.div>
 
-              <div className="flex items-center gap-3">
-                <div className="flex -space-x-2">
-                  <ImageWithFallback src="https://images.unsplash.com/photo-1631885628966-a14af9faaa9b?w=100&h=100&fit=crop" alt="User" className="w-10 h-10 rounded-full border-2 border-white object-cover" />
-                  <ImageWithFallback src="https://images.unsplash.com/photo-1544005313-94ddf0286df2?w=100&h=100&fit=crop" alt="User" className="w-10 h-10 rounded-full border-2 border-white object-cover" />
-                  <ImageWithFallback src="https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=100&h=100&fit=crop" alt="User" className="w-10 h-10 rounded-full border-2 border-white object-cover" />
+            {/* Scanner Core Section */}
+            <motion.div
+              initial={{ opacity: 0, scale: 0.9 }}
+              animate={{ opacity: 1, scale: 1 }}
+              transition={{ duration: 0.6, delay: 0.2 }}
+              className="relative w-full flex items-center justify-center"
+              style={{ height: 400 }}
+            >
+              {/* Counter above scanner */}
+              <motion.div
+                className="absolute -top-16 left-1/2 -translate-x-1/2 px-6 py-3 rounded-full border border-[#eddffb] bg-white/70 dark:bg-purple-900/20 backdrop-blur-xl shadow-lg"
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: 0.3 }}
+              >
+                <div className="flex items-center gap-3">
+                  <span className="text-sm text-gray-700 dark:text-gray-300 font-medium">
+                    <strong className="text-[#8b63d3]">{files.length}</strong> / {maxPhotos} photos
+                  </span>
+                  <div className="flex gap-1">
+                    {Array.from({ length: maxPhotos }).map((_, index) => (
+                      <div
+                        key={index}
+                        className={`w-2 h-2 rounded-full transition-all ${
+                          index < files.length
+                            ? "bg-[#8b63d3] scale-110"
+                            : "bg-gray-300 dark:bg-gray-600"
+                        }`}
+                      />
+                    ))}
+                  </div>
                 </div>
-                <p className="text-sm text-gray-600 dark:text-gray-400">
-                  {t("landing.trustedBy")} <strong className="text-gray-900 dark:text-white">10,000+</strong> {t("landing.users")}
+              </motion.div>
+
+              {/* Scanner Core */}
+              <ScannerCore isScanning={uploading} />
+
+              {/* Action Buttons */}
+              <ScannerActions
+                onCamera={() => {
+                  if (isLimitReached) {
+                    toast.error(`Max ${maxPhotos} images reached`);
+                    return;
+                  }
+                  initSound();
+                  setShowCamera(true);
+                }}
+                onUpload={() => {
+                  if (!isLimitReached) {
+                    // Trigger hidden file input
+                    const fileInput = document.getElementById("file-input") as HTMLInputElement;
+                    fileInput?.click();
+                  }
+                }}
+                disabled={isLimitReached}
+              />
+            </motion.div>
+
+            {/* Photo Preview Grid */}
+            {files.length > 0 && (
+              <motion.div
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ duration: 0.5 }}
+                className="w-full"
+              >
+                <p className="text-center text-sm font-semibold text-gray-700 dark:text-gray-300 mb-4">
+                  Selected Photos
                 </p>
-              </div>
+                <div className="flex justify-center">
+                  <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4 max-w-2xl">
+                    <AnimatePresence>
+                      {files.map((file, index) => (
+                        <motion.div
+                          key={`${file.name}-${index}`}
+                          initial={{ opacity: 0, scale: 0.7 }}
+                          animate={{ opacity: 1, scale: 1 }}
+                          exit={{ opacity: 0, scale: 0.7 }}
+                          className="relative group"
+                        >
+                          <motion.div
+                            className="aspect-square rounded-2xl overflow-hidden border border-[#eddffb] bg-white/40 backdrop-blur-sm"
+                            whileHover={{ scale: 1.08 }}
+                          >
+                            <img
+                              src={previewUrls[index]}
+                              className="w-full h-full object-cover"
+                            />
+                            <div className="absolute inset-0 bg-gradient-to-br from-white/20 to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
+                          </motion.div>
+
+                          <button
+                            onClick={() => removeFile(index)}
+                            className="absolute -top-2 -right-2 w-7 h-7 bg-red-500 text-white rounded-full flex items-center justify-center opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity shadow-lg hover:bg-red-600"
+                            aria-label="Remove photo"
+                          >
+                            <X size={14} />
+                          </button>
+                        </motion.div>
+                      ))}
+                    </AnimatePresence>
+                  </div>
+                </div>
+              </motion.div>
+            )}
+
+            {/* Analyze Button */}
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.6, delay: 0.3 }}
+              className="w-full max-w-md"
+            >
+              <motion.div
+                whileHover={!uploading ? { scale: 1.02 } : {}}
+                whileTap={!uploading ? { scale: 0.98 } : {}}
+              >
+                <Button
+                  glow
+                  className="w-full h-14 text-lg font-semibold bg-gradient-to-r from-[#8b63d3] via-[#c95785] to-[#e8a1c0] hover:from-[#7a5325] hover:via-[#b83f6f] hover:to-[#d68fb0]"
+                  onClick={handleAnalyze}
+                  disabled={uploading || files.length === 0}
+                >
+                  {uploading ? (
+                    <motion.div
+                      animate={{ rotate: 360 }}
+                      transition={{ duration: 1, repeat: Infinity, ease: "linear" }}
+                      className="inline-block mr-2"
+                    >
+                      ◆
+                    </motion.div>
+                  ) : (
+                    "↗"
+                  )}
+                  {uploading ? "Analyzing Your Skin..." : "Analyze My Skin"}
+                </Button>
+              </motion.div>
             </motion.div>
 
-            <motion.div initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} transition={{ duration: 0.8, delay: 0.2 }} className="relative flex justify-center lg:justify-end">
-              <div className="relative w-full max-w-[580px] min-h-[560px] lg:min-h-[610px]">
-                <div className="deepskyn-hero-shell relative mx-auto w-[320px] sm:w-[360px] rounded-[22px] p-4 backdrop-blur-xl border border-white/20 shadow-2xl">
-                  <Interactive3DOrb imageUrl={FACE_PORTRAIT_URL} />
-                </div>
-
-                <div className="absolute top-6 right-4 deepskyn-chip-card">
-                  <p className="deepskyn-chip-title">{t("landing.analysisCardTitle")}</p>
-                  <p className="deepskyn-chip-value">{t("landing.analysisCardAccuracy")}</p>
-                </div>
-
-                <motion.div className="absolute top-[108px] left-[0px] sm:left-[-22px] deepskyn-chip-card" animate={{ y: [0, -4, 0] }} transition={{ duration: 4, repeat: Infinity }}>
-                  <p className="deepskyn-chip-value">{t("landing.moisture")}</p>
-                  <div className="deepskyn-chip-bars" />
-                </motion.div>
-
-                <motion.div className="absolute top-[170px] right-[0px] sm:right-[-22px] deepskyn-chip-card" animate={{ y: [0, 5, 0] }} transition={{ duration: 4.6, repeat: Infinity }}>
-                  <p className="deepskyn-chip-value">{t("landing.texture")}</p>
-                  <div className="deepskyn-chip-bars" />
-                </motion.div>
-
-                <motion.div className="absolute top-[286px] right-[-10px] sm:right-[-24px] deepskyn-chip-card" animate={{ y: [0, -5, 0] }} transition={{ duration: 4.2, repeat: Infinity }}>
-                  <p className="deepskyn-chip-value">{t("landing.blemishes")}</p>
-                </motion.div>
-
-                <motion.div className="absolute top-[356px] right-[0px] sm:right-[-16px] deepskyn-chip-card" animate={{ y: [0, 4, 0] }} transition={{ duration: 5, repeat: Infinity }}>
-                  <p className="deepskyn-chip-value">{t("landing.sunDamage")}</p>
-                  <div className="deepskyn-chip-bars" />
-                </motion.div>
-
-                <motion.div className="absolute top-[376px] left-[6px] sm:left-[-16px] deepskyn-chip-card" animate={{ y: [0, 3, 0] }} transition={{ duration: 4.4, repeat: Infinity }}>
-                  <p className="deepskyn-chip-value">{t("landing.ageEstimation")}</p>
-                </motion.div>
-
-                <motion.div className="deepskyn-assistant absolute bottom-[128px] left-[2px] sm:left-[-30px]" animate={{ y: [0, -4, 0] }} transition={{ duration: 4.8, repeat: Infinity }}>
-                  <div className="deepskyn-assistant-avatar">
-                    <Sparkles className="w-4 h-4 text-[#b25593]" />
-                  </div>
-                  <div>
-                    <p className="text-[11px] text-[#785f86] dark:text-[#c4b4d6]">{t("landing.guideName")}</p>
-                    <p className="text-xs font-semibold text-[#2f3449] dark:text-[#f1e7fb]">{t("landing.guidePrompt")}</p>
-                  </div>
-                </motion.div>
-
-                <div className="deepskyn-surface-card absolute -bottom-2 sm:bottom-2 right-2 sm:right-0 w-[260px] sm:w-[285px] rounded-[20px] backdrop-blur-xl p-4">
-                  <div className="grid grid-cols-2 gap-3 mb-3">
-                    <div className="rounded-[14px] bg-gradient-to-br from-[#e9f0ff] to-[#f4ecff] border border-[#d8e4ff] p-3 h-[94px]">
-                      <ImageWithFallback src="https://images.unsplash.com/photo-1598662972299-5408ddb8a3dc?w=300" alt="Skincare bottle" className="w-full h-full object-contain" />
+            {/* Tips Card */}
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.6, delay: 0.4 }}
+              className="w-full"
+            >
+              <GlassCard className="bg-white/75 border border-[#eddffb] dark:bg-purple-900/20 p-6 backdrop-blur-xl">
+                <div className="flex items-start gap-3">
+                  <Info className="w-5 h-5 text-[#8b63d3] mt-1 flex-shrink-0" />
+                  <div className="text-sm text-gray-700 dark:text-gray-300">
+                    <p className="mb-3 font-semibold">For best results, capture from multiple angles:</p>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                      <ul className="list-disc list-inside space-y-1 text-gray-600 dark:text-gray-400">
+                        <li>Front view (face forward)</li>
+                        <li>Left side profile</li>
+                        <li>Right side profile</li>
+                      </ul>
+                      <ul className="list-disc list-inside space-y-1 text-gray-600 dark:text-gray-400">
+                        <li>Use natural lighting</li>
+                        <li>Remove makeup if possible</li>
+                        <li>Ensure photos are clear and focused</li>
+                      </ul>
                     </div>
-                    <div className="rounded-[14px] bg-gradient-to-br from-[#e9f0ff] to-[#f4ecff] border border-[#d8e4ff] p-3 h-[94px]">
-                      <ImageWithFallback src="https://images.unsplash.com/photo-1608248597279-f99d160bfcbc?w=300" alt="Skincare cream" className="w-full h-full object-contain" />
-                    </div>
                   </div>
-                  <p className="text-sm sm:text-base font-semibold text-[#22263d]">{t("landing.skinTypeLabel")}</p>
+                </div>
+              </GlassCard>
+            </motion.div>
+          </div>
+
+          {/* Hidden file input */}
+          <input
+            id="file-input"
+            type="file"
+            hidden
+            multiple
+            accept="image/*"
+            onChange={handleFileChange}
+          />
+        </div>
+
+        {/* CAMERA MODAL - Enhanced UI */}
+        {showCamera && (
+          <motion.div
+            className="fixed inset-0 bg-black/80 backdrop-blur-xl flex items-center justify-center z-50 p-4"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.3 }}
+          >
+            <motion.div
+              className="relative w-[min(95vw,800px)]"
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              transition={{ duration: 0.3 }}
+            >
+              <Webcam
+                ref={webcamRef}
+                screenshotFormat="image/jpeg"
+                videoConstraints={{ facingMode: "user" }}
+                className="w-full rounded-3xl shadow-[0_20px_60px_rgba(0,0,0,0.6)]"
+              />
+
+              {/* 🎯 ENHANCED SCANNER OVAL GUIDE */}
+              <div className="absolute inset-0 flex items-center justify-center pointer-events-none rounded-3xl overflow-hidden">
+                <div className="relative h-80 w-64 sm:h-96 sm:w-72">
+                  {/* Main oval frame */}
+                  <motion.div
+                    className={`absolute inset-0 rounded-full border-2 transition-all duration-300 ${
+                      isCentered
+                        ? "border-emerald-300/90"
+                        : "border-white/50"
+                    }`}
+                    style={{
+                      boxShadow: isCentered
+                        ? "0 0 50px rgba(52,211,153,0.6), inset 0 0 40px rgba(52,211,153,0.3)"
+                        : "0 0 40px rgba(206,154,255,0.4), inset 0 0 30px rgba(245,183,220,0.25)",
+                    }}
+                    animate={{ scale: isCentered ? [1, 1.02, 1] : [1, 1.01, 1] }}
+                    transition={{ duration: 1.6, repeat: Infinity, ease: "easeInOut" }}
+                  />
+
+                  {/* Inner frame */}
+                  <motion.div
+                    className="absolute inset-1 rounded-full border border-[#eebee2]/80"
+                    style={{
+                      boxShadow: "0 0 30px rgba(195,140,255,0.35)",
+                    }}
+                    animate={{ opacity: [0.5, 0.9, 0.5] }}
+                    transition={{ duration: 2.8, repeat: Infinity, ease: "easeInOut" }}
+                  />
+
+                  {/* Scanning line */}
+                  <motion.div
+                    className="absolute left-1/2 top-2 h-1 w-40 -translate-x-1/2 rounded-full bg-gradient-to-r from-transparent via-white/80 to-transparent"
+                    animate={{ y: [0, 300, 0], opacity: [0.2, 0.9, 0.2] }}
+                    transition={{ duration: 3, repeat: Infinity, ease: "easeInOut" }}
+                  />
+
+                  {/* Corner markers */}
+                  {[
+                    "-left-2 top-8",
+                    "-left-2 bottom-8",
+                    "-right-2 top-8",
+                    "-right-2 bottom-8",
+                  ].map((position) => (
+                    <motion.span
+                      key={position}
+                      className={`absolute ${position} h-2 w-2 rounded-full bg-white/95 shadow-[0_0_16px_rgba(255,255,255,0.9)]`}
+                      animate={{ scale: [1, 1.3, 1], opacity: [0.6, 1, 0.6] }}
+                      transition={{ duration: 2, repeat: Infinity, ease: "easeInOut" }}
+                    />
+                  ))}
                 </div>
               </div>
-            </motion.div>
-          </div>
-        </section>
 
-        <section className="max-w-7xl mx-auto px-6 py-12">
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-            <motion.div initial={{ opacity: 0, y: 20 }} whileInView={{ opacity: 1, y: 0 }} viewport={{ once: true }} transition={{ duration: 0.5 }} whileHover={{ y: -8, boxShadow: "0 20px 40px rgba(201, 87, 133, 0.2)" }} className="glass-card deepskyn-surface-card rounded-2xl p-8 text-center backdrop-blur-xl border border-white/20 shadow-lg hover:shadow-2xl transition-all">
-              <motion.h3 className="text-4xl font-semibold text-[#c95785] mb-2 premium-heading" animate={{ scale: [1, 1.05, 1] }} transition={{ duration: 2, repeat: Infinity }}>100+</motion.h3>
-              <p className="text-gray-600 dark:text-gray-400">{t("landing.aiModels")}</p>
-            </motion.div>
+              {/* Close button */}
+              <motion.button
+                onClick={() => setShowCamera(false)}
+                className="absolute top-4 right-4 w-11 h-11 rounded-full bg-black/50 hover:bg-black/70 text-white border border-white/30 flex items-center justify-center transition-all backdrop-blur-md"
+                whileHover={{ scale: 1.1 }}
+                whileTap={{ scale: 0.95 }}
+                aria-label="Close camera"
+              >
+                <X size={20} />
+              </motion.button>
 
-            <motion.div initial={{ opacity: 0, y: 20 }} whileInView={{ opacity: 1, y: 0 }} viewport={{ once: true }} transition={{ duration: 0.5, delay: 0.1 }} whileHover={{ y: -8, boxShadow: "0 20px 40px rgba(201, 87, 133, 0.2)" }} className="glass-card deepskyn-surface-card rounded-2xl p-8 text-center backdrop-blur-xl border border-white/20 shadow-lg hover:shadow-2xl transition-all">
-              <motion.h3 className="text-4xl font-semibold text-[#c95785] mb-2 premium-heading" animate={{ scale: [1, 1.05, 1] }} transition={{ duration: 2, repeat: Infinity, delay: 0.3 }}>50+</motion.h3>
-              <p className="text-gray-600 dark:text-gray-400">{t("landing.skinConditions")}</p>
+              {/* Action buttons */}
+              <motion.div
+                className="flex flex-col sm:flex-row gap-4 mt-6 justify-center"
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: 0.2 }}
+              >
+                <Button
+                  onClick={capturePhoto}
+                  className="sm:w-auto px-8 h-12 bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-600 hover:to-teal-600"
+                  glow
+                >
+                  📷 Capture Photo
+                </Button>
+                <Button
+                  onClick={() => setShowCamera(false)}
+                  variant="secondary"
+                  className="sm:w-auto px-8 h-12"
+                >
+                  Cancel
+                </Button>
+              </motion.div>
             </motion.div>
-
-            <motion.div initial={{ opacity: 0, y: 20 }} whileInView={{ opacity: 1, y: 0 }} viewport={{ once: true }} transition={{ duration: 0.5, delay: 0.2 }} whileHover={{ y: -8, boxShadow: "0 20px 40px rgba(201, 87, 133, 0.2)" }} className="glass-card deepskyn-surface-card rounded-2xl p-8 text-center backdrop-blur-xl border border-white/20 shadow-lg hover:shadow-2xl transition-all">
-              <motion.h3 className="text-4xl font-semibold text-[#c95785] mb-2 premium-heading" animate={{ scale: [1, 1.05, 1] }} transition={{ duration: 2, repeat: Infinity, delay: 0.6 }}>99.8%</motion.h3>
-              <p className="text-gray-600 dark:text-gray-400">{t("landing.accuracyRate")}</p>
-            </motion.div>
-          </div>
-        </section>
-
-        <section className="max-w-7xl mx-auto px-6 py-16">
-          <motion.div initial={{ opacity: 0, y: 20 }} whileInView={{ opacity: 1, y: 0 }} viewport={{ once: true }} className="text-center mb-12">
-            <h2 className="text-4xl lg:text-5xl font-semibold text-gray-900 dark:text-white mb-4">{t("landing.innovationTitle")}</h2>
-            <p className="text-gray-600 dark:text-gray-400 max-w-2xl mx-auto">{t("landing.innovationSubtitle")}</p>
           </motion.div>
+        )}
 
-          <div className="grid lg:grid-cols-2 gap-8">
-            <motion.div initial={{ opacity: 0, x: -20 }} whileInView={{ opacity: 1, x: 0 }} viewport={{ once: true }} transition={{ duration: 0.6 }} className="glass-card deepskyn-surface-card rounded-3xl overflow-hidden group hover:shadow-2xl transition-all duration-300">
-              <div className="relative h-64 bg-gradient-to-br from-gray-900 to-teal-900 overflow-hidden">
-                <ImageWithFallback src="https://images.unsplash.com/photo-1654430343142-2d6157e69887?w=600" alt="AI Face Analysis" className="w-full h-full object-cover opacity-70 group-hover:scale-105 transition-transform duration-500" />
-                <div className="absolute inset-0 bg-gradient-to-t from-black/60 to-transparent" />
-              </div>
-              <div className="p-8">
-                <h3 className="text-2xl font-semibold text-gray-900 dark:text-white mb-3">{t("landing.deepAnalysisTitle")}</h3>
-                <p className="text-gray-600 dark:text-gray-400">{t("landing.deepAnalysisDescription")}</p>
-              </div>
-            </motion.div>
-
-            <motion.div initial={{ opacity: 0, x: 20 }} whileInView={{ opacity: 1, x: 0 }} viewport={{ once: true }} transition={{ duration: 0.6 }} className="glass-card deepskyn-surface-card rounded-3xl overflow-hidden group hover:shadow-2xl transition-all duration-300">
-              <div className="relative h-64 bg-gradient-to-br from-orange-100 to-orange-200 overflow-hidden">
-                <ImageWithFallback src="https://images.unsplash.com/photo-1651740896477-467ea46b4fe5?w=600" alt="Bespoke skincare products" className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500" />
-              </div>
-              <div className="p-8">
-                <h3 className="text-2xl font-semibold text-gray-900 dark:text-white mb-3">{t("landing.bespokeRoutineTitle")}</h3>
-                <p className="text-gray-600 dark:text-gray-400">{t("landing.bespokeRoutineDescription")}</p>
-              </div>
-            </motion.div>
-          </div>
-        </section>
-
-        <section className="max-w-7xl mx-auto px-6 py-16">
-          <div className="grid lg:grid-cols-2 gap-12 items-center">
-            <motion.div initial={{ opacity: 0, x: -20 }} whileInView={{ opacity: 1, x: 0 }} viewport={{ once: true }} transition={{ duration: 0.6 }} className="grid grid-cols-2 gap-6">
-              <div className="deepskyn-surface-card rounded-3xl p-8 flex items-center justify-center h-64">
-                <ImageWithFallback src="https://images.unsplash.com/photo-1677726050511-48866c4a64d9?w=400" alt="Skincare bottle" className="w-full h-full object-contain" />
-              </div>
-              <div className="deepskyn-surface-card rounded-3xl p-8 flex items-center justify-center h-64">
-                <ImageWithFallback src="https://images.unsplash.com/photo-1594813591867-02e797aa4581?w=400" alt="Skincare jar" className="w-full h-full object-contain" />
-              </div>
-            </motion.div>
-
-            <motion.div initial={{ opacity: 0, x: 20 }} whileInView={{ opacity: 1, x: 0 }} viewport={{ once: true }} transition={{ duration: 0.6 }}>
-              <h2 className="text-4xl lg:text-5xl font-semibold text-gray-900 dark:text-white mb-6">
-                {t("landing.molecularTitleTop")}<br />
-                {t("landing.molecularTitleBottom")}
-              </h2>
-              <p className="text-gray-600 dark:text-gray-400 mb-8">{t("landing.molecularDescription")}</p>
-
-              <div className="space-y-4 mb-8">
-                <div className="flex items-start gap-3">
-                  <div className="w-6 h-6 rounded-full bg-[#c95785] flex items-center justify-center flex-shrink-0 mt-0.5">
-                    <Check className="w-4 h-4 text-white" />
-                  </div>
-                  <p className="text-gray-700 dark:text-gray-300">{t("landing.fragranceFree")}</p>
-                </div>
-                <div className="flex items-start gap-3">
-                  <div className="w-6 h-6 rounded-full bg-[#c95785] flex items-center justify-center flex-shrink-0 mt-0.5">
-                    <Check className="w-4 h-4 text-white" />
-                  </div>
-                  <p className="text-gray-700 dark:text-gray-300">{t("landing.scientificallyBacked")}</p>
-                </div>
-                <div className="flex items-start gap-3">
-                  <div className="w-6 h-6 rounded-full bg-[#c95785] flex items-center justify-center flex-shrink-0 mt-0.5">
-                    <Check className="w-4 h-4 text-white" />
-                  </div>
-                  <p className="text-gray-700 dark:text-gray-300">{t("landing.clinicallyProven")}</p>
-                </div>
-              </div>
-
-              <button className="deepskyn-surface-card rounded-full px-5 py-2.5 flex items-center gap-2 text-[#c95785] dark:text-[#dfb6f6] hover:gap-4 transition-all duration-300 group">
-                <span className="font-semibold uppercase tracking-wider text-sm">{t("landing.discoverIngredients")}</span>
-                <ArrowRight className="w-5 h-5 group-hover:translate-x-1 transition-transform" />
-              </button>
-            </motion.div>
-          </div>
-        </section>
-
-        <section className="max-w-7xl mx-auto px-6 py-20">
-          <motion.div initial={{ opacity: 0, y: 20 }} whileInView={{ opacity: 1, y: 0 }} viewport={{ once: true }} className="glass-card deepskyn-hero-shell rounded-3xl p-12 lg:p-16 text-center relative overflow-hidden">
-            <div className="absolute inset-0 bg-gradient-to-br from-[#d96b95]/15 to-[#f29b77]/5" />
-            <div className="relative z-10">
-              <h2 className="text-4xl lg:text-5xl font-semibold text-gray-900 dark:text-white mb-6">
-                {t("landing.ctaTitleTop")}<br />
-                {t("landing.ctaTitleBottom")}
-              </h2>
-              <p className="text-lg text-gray-600 dark:text-gray-400 mb-8 max-w-2xl mx-auto">{t("landing.ctaSubtitle")}</p>
-              <div className="max-w-xl mx-auto mb-6">
-                <input
-                  type="email"
-                  className="deepskyn-neo-input px-5 py-3 text-sm sm:text-base"
-                  placeholder={t("landing.emailPlaceholder")}
-                  aria-label="Email address"
-                />
-              </div>
-              <Button glow onClick={() => navigate("/questionnaire")} className="deepskyn-neo-button px-10 py-4 text-lg">
-                {t("landing.finalCta")}
-              </Button>
-            </div>
-          </motion.div>
-        </section>
-      </motion.div>
+      </div>
     </PageTransition>
   );
 }
+

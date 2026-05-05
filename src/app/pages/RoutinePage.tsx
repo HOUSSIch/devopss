@@ -1,1319 +1,630 @@
-import { useEffect, useState } from "react";
+import { useState, ChangeEvent, useRef, useEffect, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
+import Webcam from "react-webcam";
+
+
 import { Button } from "../components/Button";
 import { GlassCard } from "../components/GlassCard";
+import { ProgressIndicator } from "../components/ProgressIndicator";
 import { PageTransition } from "../components/PageTransition";
-import { motion, Reorder, useInView } from "motion/react";
-import { useRef } from "react";
-import {
-  Sun,
-  Moon,
-  Droplets,
-  Sparkles,
-  Shield,
-  Heart,
-  Fingerprint,
-  Hourglass,
-  GripVertical,
-  AlertCircle,
-  Check,
-} from "lucide-react";
+import { ScannerCore } from "../components/ScannerCore";
+import { ScannerActions } from "../components/ScannerActions";
+
+import { motion, AnimatePresence } from "motion/react";
+import { Upload, AlertCircle, X, Crown, Camera, Info } from "lucide-react";
 import { useAuth } from "../contexts/AuthContext";
+import { http } from "../api/http";
+import { usePhotoLimit } from "../../hooks/useFeatureAccess";
+import { toast } from "sonner";
 
-type RoutineStep = {
-  step: string;
-  product: string;
-  time: string;
-  purpose: string;
-  howToUse: string;
-  frequency: string;
-  priority: "high" | "medium" | "low";
-};
+const cameraCrystal = new URL("../../assets/hd_restoration_result_image.png", import.meta.url).href;
 
-type Concern = {
-  label: string;
-  severity: "Mild" | "Moderate" | "High";
-  description: string;
-};
-
-type AnalysisResult = {
-  skinType: string;
-  healthScore: number;
-  skinAge: number;
-  summary: string;
-  concerns: Concern[];
-  morningRoutine: RoutineStep[];
-  eveningRoutine: RoutineStep[];
-};
-
-const getStepIcon = (step: string) => {
-  const name = step.toLowerCase();
-
-  if (
-    name.includes("cleanser") ||
-    name.includes("cleaning") ||
-    name.includes("cleanse")
-  ) {
-    return Droplets;
-  }
-
-  if (
-    name.includes("toner") ||
-    name.includes("exfoliant") ||
-    name.includes("tone")
-  ) {
-    return Sparkles;
-  }
-
-  if (name.includes("serum") || name.includes("treat")) {
-    return Heart;
-  }
-
-  if (
-    name.includes("sunscreen") ||
-    name.includes("spf") ||
-    name.includes("protection") ||
-    name.includes("protect")
-  ) {
-    return Shield;
-  }
-
-  if (
-    name.includes("moisturizer") ||
-    name.includes("cream") ||
-    name.includes("hydrate") ||
-    name.includes("moisturize")
-  ) {
-    return Droplets;
-  }
-
-  return Sparkles;
-};
-
-const getPriorityBadge = (priority: "high" | "medium" | "low") => {
-  switch (priority) {
-    case "high":
-      return "bg-[#efe1cf] text-[#8f6d42] border border-[#dcc3a4]";
-    case "medium":
-      return "bg-[#ece6d7] text-[#7b7257] border border-[#d8cfb8]";
-    default:
-      return "bg-[#e5eee4] text-[#5b7a56] border border-[#bfd0bc]";
-  }
-};
-
-const getConcernTone = (severity: "Mild" | "Moderate" | "High") => {
-  switch (severity) {
-    case "High":
-      return "bg-[#a16c8f] text-white";
-    case "Moderate":
-      return "bg-[#3a857f] text-white";
-    default:
-      return "bg-[#d2bfac] text-[#6b5442]";
-  }
-};
-
-const getConcernIcon = (label: string) => {
-  const text = label.toLowerCase();
-  if (text.includes("uv") || text.includes("sun") || text.includes("protect")) {
-    return Shield;
-  }
-  if (text.includes("dehyd") || text.includes("dry") || text.includes("hydrate")) {
-    return Droplets;
-  }
-  return Sparkles;
-};
-
-const getConcernGlyph = (label: string) => {
-  const text = label.toLowerCase();
-  if (text.includes("uv") || text.includes("sun") || text.includes("protect")) {
-    return "✶";
-  }
-  if (text.includes("dehyd") || text.includes("dry") || text.includes("hydrate")) {
-    return "◍";
-  }
-  return "☼";
-};
-
-const getApproxMinutes = (time: string) => {
-  const lower = time.toLowerCase();
-  const minuteMatch = lower.match(/(\d+)\s*min/);
-  if (minuteMatch) return parseInt(minuteMatch[1], 10) || 0;
-
-  const secondMatch = lower.match(/(\d+)\s*sec/);
-  if (secondMatch) {
-    const seconds = parseInt(secondMatch[1], 10) || 0;
-    return Math.max(1, Math.round(seconds / 60));
-  }
-
-  return 1;
-};
-
-const shortenText = (value: string, maxLength: number) => {
-  if (!value) return "";
-  const normalized = value.replace(/\s+/g, " ").trim();
-  if (normalized.length <= maxLength) return normalized;
-  return `${normalized.slice(0, maxLength).trim()}...`;
-};
-
-const dedupeAdjacentPhrases = (value: string) => {
-  if (!value) return "";
-
-  const tokens = value.replace(/\s+/g, " ").trim().split(" ");
-  const result: string[] = [];
-  const maxPhraseLength = 8;
-
-  const samePhrase = (aStart: number, bStart: number, length: number) => {
-    for (let i = 0; i < length; i++) {
-      if ((tokens[aStart + i] || "").toLowerCase() !== (tokens[bStart + i] || "").toLowerCase()) {
-        return false;
-      }
-    }
-    return true;
-  };
-
-  let i = 0;
-  while (i < tokens.length) {
-    let merged = false;
-
-    for (let size = maxPhraseLength; size >= 1; size--) {
-      if (i + size * 2 > tokens.length) continue;
-      if (!samePhrase(i, i + size, size)) continue;
-
-      result.push(...tokens.slice(i, i + size));
-      i += size * 2;
-      merged = true;
-      break;
-    }
-
-    if (!merged) {
-      result.push(tokens[i]);
-      i += 1;
-    }
-  }
-
-  return result
-    .join(" ")
-    .replace(/\s+([,.;:!?])/g, "$1")
-    .trim();
-};
-
-const normalizeForDisplay = (value: string, maxLength: number, fallback = "") => {
-  const deduped = dedupeAdjacentPhrases(value || "");
-  const clean = shortenText(deduped, maxLength);
-  return clean || fallback;
-};
-
-const cleanStepTitle = (value: string) => {
-  if (!value) return "Treatment Step";
-  const normalized = dedupeAdjacentPhrases(value)
-    .replace(/routine du matin|routine du soir|morning routine|night routine/gi, "")
-    .replace(/\s+/g, " ")
-    .trim();
-  return normalized || "Treatment Step";
-};
-
-const unwrap = (raw: any): any => raw?.data ?? raw;
-
-// Helper to check if routine order is optimal
-interface OrderWarning {
-  index: number;
-  message: string;
-  type: "warning" | "success";
-}
-
-const checkOrderWarnings = (items: RoutineStep[]): OrderWarning[] => {
-  const warnings: OrderWarning[] = [];
-  const priorityValue: Record<string, number> = { high: 3, medium: 2, low: 1 };
-
-  for (let i = 0; i < items.length; i++) {
-    const current = items[i];
-    const currentPriority = priorityValue[current.priority];
-
-    // Check if any higher priority item comes after this one
-    for (let j = i + 1; j < items.length; j++) {
-      const next = items[j];
-      const nextPriority = priorityValue[next.priority];
-
-      if (nextPriority > currentPriority) {
-        warnings.push({
-          index: i,
-          message: `Higher priority item "${next.product}" should come before "${current.product}"`,
-          type: "warning",
-        });
-        break;
-      }
-    }
-  }
-
-  // Mark items in optimal positions
-  if (warnings.length === 0 && items.length > 0) {
-    items.forEach((_, i) => {
-      if (i === 0 && items[0].priority === "high") {
-        warnings.push({
-          index: i,
-          message: "Perfect order!",
-          type: "success",
-        });
-      }
-    });
-  }
-
-  return warnings;
-};
-
-// Timeline Step Component - for displaying routine items
-interface TimelineStepProps {
-  item: RoutineStep;
-  Icon: any;
-  index: number;
-  isLeft: boolean;
-  glowColor: string;
-  onActive: () => void;
-}
-
-function TimelineStep({
-  item,
-  Icon,
-  index,
-  isLeft,
-  glowColor,
-  onActive,
-}: TimelineStepProps) {
-  const ref = useRef(null);
-  const isInView = useInView(ref);
-
-  return (
-    <motion.div
-      ref={ref}
-      initial={{ opacity: 0, y: 50 }}
-      animate={isInView ? { opacity: 1, y: 0 } : { opacity: 0, y: 50 }}
-      transition={{ duration: 0.6, delay: index * 0.05 }}
-      onAnimationStart={() => {
-        if (isInView) onActive();
-      }}
-      className="relative mb-12 flex items-center"
-    >
-      {/* Left Side - Card or spacer */}
-      <div className={`flex-1 ${isLeft ? "" : "hidden"}`}>
-        <motion.div
-          initial={{ opacity: 0, x: -40, rotateY: -20 }}
-          whileInView={{ opacity: 1, x: 0, rotateY: 0 }}
-          transition={{ duration: 0.6, delay: index * 0.05 + 0.1 }}
-          whileHover={{ x: -8, rotateZ: 2, scale: 1.02 }}
-          className="rounded-2xl border border-white/70 bg-white/65 p-5 backdrop-blur-md shadow-[0_20px_48px_rgba(201,87,133,0.12)] transition-all"
-          style={{
-            boxShadow: isInView ? `0 20px 48px rgba(201,87,133,0.12), 0 0 24px ${glowColor}40` : "0 20px 48px rgba(201,87,133,0.12)",
-          }}
-        >
-          <div className="flex items-start gap-4">
-            <motion.div
-              animate={{ rotate: isInView ? 360 : 0 }}
-              transition={{ duration: 2, ease: "linear" }}
-              className="flex-shrink-0"
-            >
-              <div
-                className="flex h-12 w-12 items-center justify-center rounded-xl border-2 bg-white/50"
-                style={{ borderColor: glowColor }}
-              >
-                <Icon className="h-5 w-5" style={{ color: glowColor }} />
-              </div>
-            </motion.div>
-
-            <div className="flex-1">
-              <div className="mb-2 flex items-center justify-between gap-2">
-                <h4 className="font-semibold text-[#1c2235]">
-                  {normalizeForDisplay(cleanStepTitle(item.step), 28, "Step")}
-                </h4>
-                <motion.span
-                  animate={{ scale: isInView ? 1 : 0.95 }}
-                  className="text-xs rounded-full px-2 py-1 font-semibold"
-                  style={{ backgroundColor: `${glowColor}20`, color: glowColor }}
-                >
-                  {item.priority === "high" ? "★" : item.priority === "medium" ? "◆" : "●"}
-                </motion.span>
-              </div>
-              <p className="mb-1 text-sm font-medium text-[#5a5f73]">
-                {normalizeForDisplay(item.product, 40, "Product")}
-              </p>
-              <p className="mb-2 text-xs text-[#5a5f73]">
-                {normalizeForDisplay(item.purpose, 80, "Purpose")}
-              </p>
-              <p className="text-xs leading-relaxed text-[#5a5f73]">
-                <strong>How:</strong> {normalizeForDisplay(item.howToUse, 85, "Apply gently.")}
-              </p>
-            </div>
-          </div>
-        </motion.div>
-      </div>
-
-      {/* Center Timeline Node */}
-      <div className="relative flex w-12 flex-shrink-0 items-center justify-center">
-        <motion.div
-          animate={isInView ? { scale: [1, 1.3, 1], opacity: [1, 0.6, 1] } : { scale: 1 }}
-          transition={{ duration: 2, repeat: isInView ? Infinity : 0 }}
-          className="absolute h-8 w-8 rounded-full"
-          style={{ backgroundColor: `${glowColor}40` }}
-        />
-        <motion.div
-          animate={{ rotate: isInView ? 360 : 0 }}
-          transition={{ duration: 3, repeat: isInView ? Infinity : 0, ease: "linear" }}
-          className="h-6 w-6 rounded-full border-2 bg-white shadow-lg"
-          style={{ borderColor: glowColor }}
-        />
-      </div>
-
-      {/* Right Side - Card or spacer */}
-      <div className={`flex-1 ${!isLeft ? "" : "hidden"}`}>
-        <motion.div
-          initial={{ opacity: 0, x: 40, rotateY: 20 }}
-          whileInView={{ opacity: 1, x: 0, rotateY: 0 }}
-          transition={{ duration: 0.6, delay: index * 0.05 + 0.1 }}
-          whileHover={{ x: 8, rotateZ: -2, scale: 1.02 }}
-          className="rounded-2xl border border-white/70 bg-white/65 p-5 backdrop-blur-md shadow-[0_20px_48px_rgba(201,87,133,0.12)] transition-all"
-          style={{
-            boxShadow: isInView ? `0 20px 48px rgba(201,87,133,0.12), 0 0 24px ${glowColor}40` : "0 20px 48px rgba(201,87,133,0.12)",
-          }}
-        >
-          <div className="flex items-start gap-4">
-            <div className="flex-1">
-              <div className="mb-2 flex items-center justify-between gap-2">
-                <h4 className="font-semibold text-[#1c2235]">
-                  {normalizeForDisplay(cleanStepTitle(item.step), 28, "Step")}
-                </h4>
-                <motion.span
-                  animate={{ scale: isInView ? 1 : 0.95 }}
-                  className="text-xs rounded-full px-2 py-1 font-semibold"
-                  style={{ backgroundColor: `${glowColor}20`, color: glowColor }}
-                >
-                  {item.priority === "high" ? "★" : item.priority === "medium" ? "◆" : "●"}
-                </motion.span>
-              </div>
-              <p className="mb-1 text-sm font-medium text-[#5a5f73]">
-                {normalizeForDisplay(item.product, 40, "Product")}
-              </p>
-              <p className="mb-2 text-xs text-[#5a5f73]">
-                {normalizeForDisplay(item.purpose, 80, "Purpose")}
-              </p>
-              <p className="text-xs leading-relaxed text-[#5a5f73]">
-                <strong>How:</strong> {normalizeForDisplay(item.howToUse, 85, "Apply gently.")}
-              </p>
-            </div>
-
-            <motion.div
-              animate={{ rotate: isInView ? 360 : 0 }}
-              transition={{ duration: 2, ease: "linear" }}
-              className="flex-shrink-0"
-            >
-              <div
-                className="flex h-12 w-12 items-center justify-center rounded-xl border-2 bg-white/50"
-                style={{ borderColor: glowColor }}
-              >
-                <Icon className="h-5 w-5" style={{ color: glowColor }} />
-              </div>
-            </motion.div>
-          </div>
-        </motion.div>
-      </div>
-    </motion.div>
-  );
-}
-
-// Draggable Step Component
-interface DraggableStepProps {
-  item: RoutineStep;
-  index: number;
-  section: "morning" | "evening";
-  isExpanded: boolean;
-  onExpand: (id: string) => void;
-  hasWarning: boolean;
-  warningMessage?: string;
-}
-
-function DraggableStep({
-  item,
-  index,
-  section,
-  isExpanded,
-  onExpand,
-  hasWarning,
-  warningMessage,
-}: DraggableStepProps) {
-  const Icon = getStepIcon(item.step);
-  const glowColor =
-    item.priority === "high" ? "#c95785" : item.priority === "medium" ? "#b55f82" : "#d49cb8";
-
-  const stepId = `${section}-${index}`;
-
-  return (
-    <Reorder.Item
-      value={item}
-      id={stepId}
-      as="div"
-      initial={{ opacity: 0, y: 20 }}
-      animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0, y: -20 }}
-      transition={{ type: "spring", stiffness: 300, damping: 30 }}
-      className="group mb-3"
-    >
-      <motion.div
-        onClick={() => onExpand(stepId)}
-        whileHover={{ scale: 1.01, y: -2 }}
-        whileDrag={{ scale: 1.05, boxShadow: `0 0 20px ${glowColor}60` }}
-        className="relative cursor-pointer"
-      >
-        {/* Warning/Success Badge */}
-        {hasWarning && (
-          <motion.div
-            initial={{ opacity: 0, x: -10 }}
-            animate={{ opacity: 1, x: 0 }}
-            className="absolute -left-8 top-0 flex items-center gap-2"
-          >
-            {warningMessage?.includes("Perfect") ? (
-              <div className="flex h-6 w-6 items-center justify-center rounded-full bg-green-200">
-                <Check className="h-4 w-4 text-green-600" />
-              </div>
-            ) : (
-              <div className="flex h-6 w-6 items-center justify-center rounded-full bg-amber-200">
-                <AlertCircle className="h-4 w-4 text-amber-600" />
-              </div>
-            )}
-          </motion.div>
-        )}
-
-        {/* Main Card */}
-        <motion.div
-          className={`rounded-2xl border border-white/70 bg-white/65 p-5 backdrop-blur-md transition-all ${
-            isExpanded ? "ring-2 ring-offset-2" : ""
-          }`}
-          style={{
-            ringColor: isExpanded ? glowColor : "transparent",
-            boxShadow: isExpanded
-              ? `0 20px 48px rgba(201,87,133,0.2), 0 0 24px ${glowColor}50`
-              : `0 20px 48px rgba(201,87,133,0.12)`,
-          }}
-        >
-          {/* Collapsed View */}
-          <motion.div
-            animate={{ height: isExpanded ? 0 : "auto", opacity: isExpanded ? 0 : 1 }}
-            transition={{ duration: 0.3 }}
-            className="flex items-start gap-4 overflow-hidden"
-          >
-            {/* Drag Handle */}
-            <motion.div
-              whileHover={{ scale: 1.1 }}
-              className="mt-1 flex-shrink-0 cursor-grab active:cursor-grabbing"
-            >
-              <GripVertical className="h-5 w-5 text-[#c95785]/50" />
-            </motion.div>
-
-            {/* Icon */}
-            <motion.div
-              animate={{ rotate: 0 }}
-              transition={{ duration: 2 }}
-              className="flex-shrink-0"
-            >
-              <div
-                className="flex h-12 w-12 items-center justify-center rounded-xl border-2 bg-white/50"
-                style={{ borderColor: glowColor }}
-              >
-                <Icon className="h-5 w-5" style={{ color: glowColor }} />
-              </div>
-            </motion.div>
-
-            {/* Content */}
-            <div className="flex-1">
-              <div className="mb-1 flex items-center justify-between gap-2">
-                <h4 className="font-semibold text-[#1c2235]">
-                  {normalizeForDisplay(cleanStepTitle(item.step), 28, "Step")}
-                </h4>
-                <motion.span
-                  className="text-xs rounded-full px-2 py-1 font-semibold"
-                  style={{ backgroundColor: `${glowColor}20`, color: glowColor }}
-                >
-                  {item.priority === "high" ? "★ Essential" : item.priority === "medium" ? "◆ Important" : "● Optional"}
-                </motion.span>
-              </div>
-              <p className="text-sm font-medium text-[#5a5f73]">
-                {normalizeForDisplay(item.product, 40, "Product")}
-              </p>
-              <p className="text-xs text-[#5a5f73]">{item.time}</p>
-            </div>
-
-            {/* Click to Expand Indicator */}
-            <motion.div
-              animate={{ x: [0, 4, 0] }}
-              transition={{ duration: 2, repeat: Infinity }}
-              className="flex-shrink-0 pt-1 text-[#c95785]"
-            >
-              <span className="text-lg">⋮</span>
-            </motion.div>
-          </motion.div>
-
-          {/* Expanded View */}
-          <motion.div
-            animate={{ height: isExpanded ? "auto" : 0, opacity: isExpanded ? 1 : 0 }}
-            transition={{ duration: 0.3 }}
-            className="overflow-hidden"
-          >
-            <div className="space-y-4 border-t border-white/40 pt-4">
-              {/* Purpose */}
-              <div>
-                <p className="text-xs font-semibold uppercase text-[#c95785]">Purpose</p>
-                <p className="mt-1 text-sm leading-relaxed text-[#5a5f73]">
-                  {normalizeForDisplay(item.purpose, 120, "Targeted skincare step")}
-                </p>
-              </div>
-
-              {/* How to Use */}
-              <div>
-                <p className="text-xs font-semibold uppercase text-[#c95785]">Application</p>
-                <p className="mt-1 text-sm leading-relaxed text-[#5a5f73]">
-                  {normalizeForDisplay(item.howToUse, 150, "Apply with gentle motions")}
-                </p>
-              </div>
-
-              {/* Frequency */}
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <p className="text-xs font-semibold uppercase text-[#c95785]">Frequency</p>
-                  <p className="mt-1 text-sm font-medium text-[#1c2235]">{item.frequency}</p>
-                </div>
-                <div>
-                  <p className="text-xs font-semibold uppercase text-[#c95785]">Duration</p>
-                  <p className="mt-1 text-sm font-medium text-[#1c2235]">{item.time}</p>
-                </div>
-              </div>
-
-              {/* Priority Badge */}
-              <div className="flex items-center gap-2 rounded-lg bg-white/40 p-3">
-                <div
-                  className="flex h-8 w-8 items-center justify-center rounded-full"
-                  style={{ backgroundColor: `${glowColor}20` }}
-                >
-                  <span style={{ color: glowColor }}>
-                    {item.priority === "high" ? "★" : item.priority === "medium" ? "◆" : "●"}
-                  </span>
-                </div>
-                <div>
-                  <p className="text-xs font-semibold uppercase text-[#5a5f73]">Priority</p>
-                  <p className="text-sm font-medium text-[#1c2235] capitalize">{item.priority}</p>
-                </div>
-              </div>
-            </div>
-          </motion.div>
-        </motion.div>
-
-        {/* Warning Tooltip */}
-        {hasWarning && warningMessage && (
-          <motion.div
-            initial={{ opacity: 0, y: -10 }}
-            animate={{ opacity: 1, y: 0 }}
-            className={`mt-2 text-xs p-2 rounded-lg flex items-start gap-2 ${
-              warningMessage.includes("Perfect")
-                ? "bg-green-50 text-green-700 border border-green-200"
-                : "bg-amber-50 text-amber-700 border border-amber-200"
-            }`}
-          >
-            <AlertCircle className="h-3 w-3 mt-0.5 flex-shrink-0" />
-            <span>{warningMessage}</span>
-          </motion.div>
-        )}
-      </motion.div>
-    </Reorder.Item>
-  );
-}
-
-// AI Assistant Component with Guidance
-interface AIAssistantProps {
-  currentStep: string | null;
-  routine: RoutineStep[];
-  section: "morning" | "evening" | null;
-}
-
-const generateGuidance = (
-  currentStep: string | null,
-  routine: RoutineStep[],
-  section: "morning" | "evening" | null,
-): string => {
-  if (!currentStep || !routine.length) {
-    return section === "morning"
-      ? "✨ Let's start your morning ritual! Begin with the first step."
-      : section === "evening"
-        ? "🌙 Ready for your evening skincare? Let's begin!"
-        : "👋 Welcome! Scroll to explore your personalized routine.";
-  }
-
-  const stepIndex = parseInt(currentStep.split("-").pop() || "0", 10);
-  const step = routine[stepIndex];
-
-  if (!step) {
-    return "✨ Great progress! Continue to the next step.";
-  }
-
-  const guidance: Record<string, string[]> = {
-    cleanser: [
-      "🧴 Start with cleanser to remove impurities",
-      "Gently massage your face with the cleanser",
-      "Rinse thoroughly with lukewarm water",
-    ],
-    toner: [
-      "✨ Apply toner to balance pH levels",
-      "Pat the toner gently into your skin",
-      "Wait a moment for full absorption",
-    ],
-    serum: [
-      "💧 Apply serum to target specific concerns",
-      "Use gentle tapping motions for absorption",
-      "Let it set before the next product",
-    ],
-    sunscreen: [
-      "☀️ Don't forget SPF protection!",
-      "Apply generously across all exposed areas",
-      "Reapply throughout the day",
-    ],
-    moisturizer: [
-      "🌊 Lock in hydration with moisturizer",
-      "Massage in upward strokes for circulation",
-      "Complete your routine!",
-    ],
-  };
-
-  const stepType = step.step.toLowerCase();
-  let messages = guidance["cleanser"];
-
-  if (stepType.includes("toner") || stepType.includes("exfoliant")) messages = guidance.toner;
-  if (stepType.includes("serum")) messages = guidance.serum;
-  if (stepType.includes("sunscreen") || stepType.includes("spf")) messages = guidance.sunscreen;
-  if (stepType.includes("moisturizer") || stepType.includes("cream")) messages = guidance.moisturizer;
-
-  const messageIndex = stepIndex % messages.length;
-  return messages[messageIndex];
-};
-
-function AIAssistant({ currentStep, routine, section }: AIAssistantProps) {
-  const guidance = generateGuidance(currentStep, routine, section);
-  const [isVisible, setIsVisible] = useState(true);
-
-  return (
-    <motion.div
-      initial={{ opacity: 0, scale: 0.8, y: 20 }}
-      animate={{ opacity: isVisible ? 1 : 0, scale: isVisible ? 1 : 0.8, y: isVisible ? 0 : 20 }}
-      transition={{ duration: 0.4, ease: "easeOut" }}
-      className="fixed bottom-8 right-8 z-50 flex flex-col items-end gap-3"
-    >
-      {/* Chat Bubble */}
-      <motion.div
-        key={guidance}
-        initial={{ opacity: 0, scale: 0.9, y: 10 }}
-        animate={{ opacity: 1, scale: 1, y: 0 }}
-        transition={{ duration: 0.3 }}
-        className="relative max-w-xs"
-      >
-        <div className="relative rounded-3xl rounded-br-none border border-white/80 bg-gradient-to-br from-white/85 to-white/70 p-4 backdrop-blur-md shadow-[0_20px_40px_rgba(201,87,133,0.2)]">
-          {/* Glow effect */}
-          <motion.div
-            className="absolute -inset-0.5 rounded-3xl bg-gradient-to-br from-[#c95785]/20 to-[#f1a9c2]/20 blur-md -z-10"
-            animate={{ opacity: [0.5, 0.8, 0.5] }}
-            transition={{ duration: 3, repeat: Infinity }}
-          />
-
-          {/* Message */}
-          <p className="text-sm leading-relaxed text-[#1c2235] font-medium">{guidance}</p>
-
-          {/* Tail */}
-          <div className="absolute -bottom-1 -right-1 h-3 w-3 rounded-full bg-white/85" />
-        </div>
-      </motion.div>
-
-      {/* Avatar */}
-      <motion.div
-        animate={{
-          y: [0, -8, 0],
-          rotate: [0, 2, -2, 0],
-        }}
-        transition={{ duration: 4, repeat: Infinity, ease: "easeInOut" }}
-        className="relative"
-      >
-        {/* Avatar Container */}
-        <div className="flex h-16 w-16 items-center justify-center rounded-full border-2 border-white/80 bg-gradient-to-br from-[#f1a9c2] to-[#c95785] shadow-[0_12px_32px_rgba(201,87,133,0.3)] cursor-pointer hover:scale-110 transition-transform"
-          onClick={() => setIsVisible(!isVisible)}
-        >
-          {/* Avatar Icon */}
-          <motion.div
-            animate={{ scale: [1, 1.1, 1] }}
-            transition={{ duration: 2.5, repeat: Infinity }}
-            className="text-2xl"
-          >
-            ✨
-          </motion.div>
-        </div>
-
-        {/* Pulse Ring */}
-        <motion.div
-          className="absolute inset-0 rounded-full border-2 border-[#c95785]/50"
-          animate={{ scale: [1, 1.3], opacity: [1, 0] }}
-          transition={{ duration: 2, repeat: Infinity }}
-        />
-
-        {/* Status Indicator */}
-        <motion.div
-          className="absolute -bottom-1 -right-1 h-4 w-4 rounded-full bg-green-400 border-2 border-white shadow-md"
-          animate={{ scale: [1, 1.15, 1] }}
-          transition={{ duration: 2, repeat: Infinity, delay: 0.5 }}
-        />
-      </motion.div>
-
-      {/* Hint */}
-      <motion.p
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 0.6 }}
-        transition={{ delay: 0.5 }}
-        className="text-xs text-[#5a5f73] text-center"
-      >
-        Click to dismiss
-      </motion.p>
-    </motion.div>
-  );
-}
-
-export function RoutinePage() {
+export function UploadPage() {
   const navigate = useNavigate();
   const { token, isAuthenticated, isInitialized, login, refreshNow } = useAuth();
+  const { maxPhotos } = usePhotoLimit();
 
-  const [analysis, setAnalysis] = useState<AnalysisResult | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [errorMessage, setErrorMessage] = useState("");
-  const [activeStep, setActiveStep] = useState<string | null>(null);
-  const [currentSection, setCurrentSection] = useState<"morning" | "evening" | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [files, setFiles] = useState<File[]>([]);
+  const [showCamera, setShowCamera] = useState(false);
+  const [isCentered, setIsCentered] = useState(false);
+  const isLimitReached = files.length >= maxPhotos;
+
+  const webcamRef = useRef<Webcam | null>(null);
+
+  // 🔊 SOUND FIX (UNLOCK AFTER USER CLICK)
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+
+  const initSound = () => {
+    if (!audioRef.current) {
+      audioRef.current = new Audio("/beep.mp3");
+
+      // unlock audio (browser requirement)
+      audioRef.current
+        .play()
+        .then(() => {
+          audioRef.current?.pause();
+          if (audioRef.current) audioRef.current.currentTime = 0;
+        })
+        .catch(() => {});
+    }
+  };
+
+  const playSound = () => {
+    if (audioRef.current) {
+      audioRef.current.currentTime = 0;
+      audioRef.current.play().catch(() => {});
+    }
+  };
+
+  const previewUrls = useMemo(
+    () => files.map((file) => URL.createObjectURL(file)),
+    [files],
+  );
 
   useEffect(() => {
-    const fetchLatestAnalysis = async () => {
-      if (!isInitialized) return;
-
-      if (!isAuthenticated) {
-        setLoading(false);
-        setErrorMessage("Please log in first.");
-        return;
-      }
-
-      try {
-        await refreshNow();
-
-        if (!token) {
-          throw new Error("Authentication token is missing");
-        }
-
-        const API = (import.meta.env.VITE_API_URL as string) || "http://localhost:3000";
-        const response = await fetch(`${API}/ai/my-latest-analysis`, {
-          method: "GET",
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
-        });
-
-        const raw = await response.json();
-
-        if (!response.ok) {
-          throw new Error(
-            typeof raw?.message === "string"
-              ? raw.message
-              : raw?.error || "Failed to load routine",
-          );
-        }
-
-        const data = unwrap(raw);
-
-        if (!data) {
-          setAnalysis(null);
-          setErrorMessage("No analysis found. Please upload a photo first.");
-          return;
-        }
-
-        const normalizedAnalysis: AnalysisResult = {
-          skinType: data.skinType,
-          healthScore: data.healthScore,
-          skinAge: data.skinAge,
-          summary: data.summary,
-          concerns: Array.isArray(data.concerns) ? data.concerns : [],
-          morningRoutine: Array.isArray(data.morningRoutine) ? data.morningRoutine : [],
-          eveningRoutine: Array.isArray(data.eveningRoutine) ? data.eveningRoutine : [],
-        };
-
-        setAnalysis(normalizedAnalysis);
-        setErrorMessage("");
-      } catch (error: any) {
-        console.error("Failed to fetch latest analysis:", error);
-
-        const fallback = localStorage.getItem("skinAnalysisResult");
-        if (fallback) {
-          try {
-            const data = unwrap(JSON.parse(fallback));
-            if (data) {
-              setAnalysis(data);
-              setErrorMessage("");
-            } else {
-              setErrorMessage(error?.message || "Failed to load routine");
-            }
-          } catch {
-            setErrorMessage(error?.message || "Failed to load routine");
-          }
-        } else {
-          setErrorMessage(error?.message || "Failed to load routine");
-        }
-      } finally {
-        setLoading(false);
-      }
+    return () => {
+      previewUrls.forEach((url) => URL.revokeObjectURL(url));
     };
+  }, [previewUrls]);
 
-    fetchLatestAnalysis();
-  }, [isAuthenticated, isInitialized, token, refreshNow]);
+  // 📂 Upload
+  const handleFileChange = (e: ChangeEvent<HTMLInputElement>) => {
+    if (!e.target.files) return;
 
-  const morningRoutine = analysis?.morningRoutine || [];
-  const nightRoutine = analysis?.eveningRoutine || [];
+    const incomingFiles = Array.from(e.target.files);
+    const newFiles = incomingFiles.filter((file) => file.type.startsWith("image/"));
+    const remainingSlots = maxPhotos - files.length;
 
-  const totalMorningTime = morningRoutine.reduce(
-    (total, item) => total + getApproxMinutes(item.time),
-    0,
-  );
+    if (newFiles.length !== incomingFiles.length) {
+      toast.error("Only image files are allowed");
+    }
 
-  const totalNightTime = nightRoutine.reduce(
-    (total, item) => total + getApproxMinutes(item.time),
-    0,
-  );
+    if (remainingSlots === 0) {
+      toast.error(`Max ${maxPhotos} images reached`);
+      return;
+    }
 
-  const allSteps = [
-    ...morningRoutine.map((r, i) => ({ ...r, id: `morning-${i}`, section: "morning" as const })),
-    ...nightRoutine.map((r, i) => ({ ...r, id: `night-${i}`, section: "night" as const })),
-  ];
+    setFiles((prev) => [...prev, ...newFiles.slice(0, remainingSlots)]);
+  };
+
+  // ❌ remove
+  const removeFile = (index: number) => {
+    setFiles((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  // 📸 capture
+  const capturePhoto = () => {
+    if (files.length >= maxPhotos) {
+      toast.error(`Max ${maxPhotos} images reached`);
+      return;
+    }
+
+    if (!webcamRef.current) return;
+
+    const imageSrc = webcamRef.current.getScreenshot();
+    if (!imageSrc) return;
+
+    const byteString = atob(imageSrc.split(",")[1]);
+    const mimeString = imageSrc.split(",")[0].split(":")[1].split(";")[0];
+
+    const ab = new ArrayBuffer(byteString.length);
+    const ia = new Uint8Array(ab);
+
+    for (let i = 0; i < byteString.length; i++) {
+      ia[i] = byteString.charCodeAt(i);
+    }
+
+    const file = new File([ab], "camera.jpg", { type: mimeString });
+
+    setFiles((prev) => [...prev, file].slice(0, maxPhotos));
+    setShowCamera(false);
+  };
+
+  // 🎯 simple center effect (visual only)
+  useEffect(() => {
+    if (!showCamera) return;
+
+    const interval = setInterval(() => {
+      const centered = Math.random() > 0.5;
+
+      setIsCentered(centered);
+
+      if (centered) {
+        playSound();
+      }
+    }, 2000);
+
+    return () => clearInterval(interval);
+  }, [showCamera]);
+
+  // 🚀 analyze
+  const handleAnalyze = async () => {
+    if (!files.length) return toast.error("Upload at least one photo");
+
+    if (!isInitialized) return toast.error("Auth initializing...");
+    if (!isAuthenticated) {
+      login("/upload");
+      return;
+    }
+
+    setUploading(true);
+
+    const formData = new FormData();
+    formData.append("image", files[0]);
+
+    try {
+      await refreshNow();
+
+      const API = (import.meta.env.VITE_API_URL as string) || "http://localhost:3000";
+      const res = await fetch(`${API}/ai/analyze`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+        body: formData,
+      });
+
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.message || "Error");
+
+      localStorage.setItem("skinAnalysisResult", JSON.stringify(data));
+      navigate("/results");
+    } catch (err: any) {
+      toast.error(err.message);
+    } finally {
+      setUploading(false);
+    }
+  };
 
   return (
     <PageTransition direction="left">
-      <div className="relative min-h-screen overflow-x-hidden bg-gradient-to-br from-[#f9dbe6] via-[#f8f0fb] to-[#fff3eb] px-4 py-12 sm:px-6">
-        {/* Animated Background */}
-        <div className="pointer-events-none absolute inset-0">
-          <div className="absolute inset-0 bg-[radial-gradient(circle_at_20%_10%,rgba(255,255,255,0.5),transparent_38%),radial-gradient(circle_at_85%_25%,rgba(241,169,194,0.3),transparent_36%),radial-gradient(circle_at_50%_95%,rgba(255,212,188,0.2),transparent_32%)]" />
-          <div className="absolute inset-0 opacity-[0.2]" style={{ backgroundImage: "repeating-radial-gradient(circle at 50% 50%, rgba(167,142,155,0.08) 0px, rgba(167,142,155,0.08) 1px, transparent 1px, transparent 8px)" }} />
-          
-          {/* Floating particles */}
-          {[...Array(6)].map((_, i) => (
-            <motion.div
-              key={`particle-${i}`}
-              className="absolute rounded-full blur-xl"
-              style={{
-                width: 200 + i * 100,
-                height: 200 + i * 100,
-                left: `${15 + i * 15}%`,
-                top: `${-10 + i * 20}%`,
-                background: i % 2 === 0
-                  ? "radial-gradient(circle, rgba(241,169,194,0.25), rgba(241,169,194,0))"
-                  : "radial-gradient(circle, rgba(255,212,188,0.15), rgba(255,212,188,0))",
-              }}
-              animate={{
-                x: [0, 40 - i * 8, 0],
-                y: [0, -28 + i * 5, 0],
-              }}
-              transition={{
-                duration: 14 + i * 2,
-                repeat: Infinity,
-                ease: "easeInOut",
-              }}
-            />
-          ))}
+      <div className="relative isolate min-h-screen overflow-hidden bg-[#f4edf9] dark:bg-[#1a0f2e] flex items-center justify-center p-4 pt-24 sm:p-6 sm:pt-20">
+        {/* AI BACKGROUND LAYERS */}
+        <div className="pointer-events-none absolute inset-0 z-0">
+          <motion.img
+            src={cameraCrystal}
+            alt=""
+            aria-hidden="true"
+            className="absolute right-[6%] top-[14%] w-[280px] sm:w-[340px] opacity-[0.28] blur-[0.4px]"
+            style={{ filter: "drop-shadow(0 20px 42px rgba(165,103,255,0.28))" }}
+            animate={{ y: [0, -22, 0], x: [0, -16, 0], rotate: [0, 1.8, 0] }}
+            transition={{ duration: 10, repeat: Infinity, ease: "easeInOut" }}
+          />
+
+          <motion.img
+            src={cameraCrystal}
+            alt=""
+            aria-hidden="true"
+            className="absolute left-[5%] bottom-[8%] w-[190px] sm:w-[240px] opacity-[0.18] scale-x-[-1]"
+            style={{ filter: "drop-shadow(0 14px 36px rgba(165,103,255,0.2))" }}
+            animate={{ y: [0, 16, 0], x: [0, 12, 0], rotate: [0, -1.6, 0] }}
+            transition={{ duration: 12, repeat: Infinity, ease: "easeInOut" }}
+          />
+
+          <div
+            className="absolute inset-0"
+            style={{
+              background:
+                "radial-gradient(1200px 620px at 10% 10%, rgba(249,188,218,0.48), transparent 60%), radial-gradient(980px 560px at 90% 15%, rgba(196,145,255,0.42), transparent 58%), radial-gradient(820px 500px at 50% 92%, rgba(255,201,174,0.36), transparent 58%)",
+            }}
+          />
+
+          <motion.div
+            className="absolute -top-28 -left-24 h-[420px] w-[420px] rounded-full bg-[radial-gradient(circle_at_center,rgba(252,197,223,0.62),rgba(252,197,223,0)_70%)] blur-3xl"
+            animate={{ x: [0, 52, 0], y: [0, 30, 0] }}
+            transition={{ duration: 18, repeat: Infinity, ease: "easeInOut" }}
+          />
+          <motion.div
+            className="absolute top-[22%] -right-28 h-[440px] w-[440px] rounded-full bg-[radial-gradient(circle_at_center,rgba(205,171,255,0.52),rgba(205,171,255,0)_70%)] blur-3xl"
+            animate={{ x: [0, -42, 0], y: [0, -26, 0] }}
+            transition={{ duration: 20, repeat: Infinity, ease: "easeInOut" }}
+          />
+          <motion.div
+            className="absolute -bottom-32 left-[24%] h-[420px] w-[420px] rounded-full bg-[radial-gradient(circle_at_center,rgba(255,199,173,0.48),rgba(255,199,173,0)_72%)] blur-3xl"
+            animate={{ x: [0, 36, 0], y: [0, -32, 0] }}
+            transition={{ duration: 22, repeat: Infinity, ease: "easeInOut" }}
+          />
+
+          <motion.div
+            className="absolute -left-[35%] top-[-20%] h-[180%] w-[55%] rotate-[16deg] opacity-[0.3]"
+            style={{
+              background:
+                "linear-gradient(180deg, rgba(255,255,255,0), rgba(247,189,220,0.94), rgba(196,145,255,0.7), rgba(255,255,255,0))",
+              filter: "blur(42px)",
+            }}
+            animate={{ x: ["0%", "280%"] }}
+            transition={{ duration: 10, repeat: Infinity, ease: "linear" }}
+          />
+
+          {/* Floating AI particles */}
+          <motion.div
+            className="absolute left-[5%] top-[18%] h-36 w-36 rounded-full bg-[radial-gradient(circle_at_30%_30%,rgba(255,218,236,0.98),rgba(255,218,236,0))] blur-2xl"
+            animate={{ x: [0, 78, 0], y: [0, -52, 0], scale: [1, 1.08, 1] }}
+            transition={{ duration: 11, repeat: Infinity, ease: "easeInOut" }}
+          />
+          <motion.div
+            className="absolute right-[7%] top-[30%] h-32 w-32 rounded-full bg-[radial-gradient(circle_at_40%_35%,rgba(210,183,255,0.94),rgba(210,183,255,0))] blur-2xl"
+            animate={{ x: [0, -64, 0], y: [0, 42, 0], scale: [1, 1.1, 1] }}
+            transition={{ duration: 12, repeat: Infinity, ease: "easeInOut" }}
+          />
+          <motion.div
+            className="absolute left-[16%] bottom-[11%] h-28 w-28 rounded-full bg-[radial-gradient(circle_at_center,rgba(255,218,193,0.92),rgba(255,218,193,0))] blur-xl"
+            animate={{ x: [0, 54, 0], y: [0, -34, 0], scale: [1, 1.08, 1] }}
+            transition={{ duration: 10, repeat: Infinity, ease: "easeInOut" }}
+          />
+          <motion.div
+            className="absolute right-[14%] bottom-[16%] h-40 w-40 rounded-full bg-[radial-gradient(circle_at_center,rgba(233,198,255,0.84),rgba(233,198,255,0))] blur-2xl"
+            animate={{ x: [0, -58, 0], y: [0, -40, 0], scale: [1, 1.08, 1] }}
+            transition={{ duration: 14, repeat: Infinity, ease: "easeInOut" }}
+          />
+          {["left-[10%] top-[12%]", "left-[84%] top-[16%]", "left-[78%] top-[72%]", "left-[20%] top-[70%]", "left-[64%] top-[26%]", "left-[35%] top-[82%]"]
+            .map((position, index) => (
+              <motion.span
+                key={position}
+                className={`absolute ${position} h-2.5 w-2.5 rounded-full bg-white/80 shadow-[0_0_18px_rgba(245,183,220,0.72)]`}
+                animate={{ y: [0, -24, 0], x: [0, 8, 0], opacity: [0.4, 1, 0.4] }}
+                transition={{ duration: 4 + index * 0.5, repeat: Infinity, ease: "easeInOut" }}
+              />
+            ))}
+
+          <div
+            className="absolute inset-0 opacity-[0.1] dark:opacity-[0.14]"
+            style={{
+              backgroundImage:
+                "linear-gradient(rgba(139,99,211,0.22) 1px, transparent 1px), linear-gradient(90deg, rgba(139,99,211,0.18) 1px, transparent 1px)",
+              backgroundSize: "52px 52px",
+            }}
+          />
+
+          <div
+            className="absolute inset-0 opacity-[0.12] dark:opacity-[0.16]"
+            style={{
+              backgroundImage:
+                "radial-gradient(circle at center, rgba(139,99,211,0.35) 1px, transparent 1.2px)",
+              backgroundSize: "30px 30px",
+            }}
+          />
+
+          <motion.div
+            className="absolute inset-0 opacity-[0.14] dark:opacity-[0.2]"
+            style={{
+              backgroundImage:
+                "repeating-linear-gradient(180deg, rgba(139,99,211,0.3) 0px, rgba(139,99,211,0.3) 1px, transparent 1px, transparent 10px)",
+            }}
+            animate={{ y: [0, 34, 0] }}
+            transition={{ duration: 9, repeat: Infinity, ease: "linear" }}
+          />
         </div>
 
-        <div className="relative z-10 mx-auto max-w-4xl">
-          {/* Header */}
+        <div className="relative z-10 w-full max-w-6xl">
+          {/* Progress bar */}
           <motion.div
-            initial={{ opacity: 0, y: -30 }}
+            initial={{ opacity: 0, y: -20 }}
             animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.8 }}
-            className="mb-16 text-center"
+            transition={{ duration: 0.6 }}
+            className="mb-12"
           >
-            <h1
-              className="mb-4 text-5xl font-semibold tracking-tight text-[#1c2235] sm:text-6xl"
-              style={{ fontFamily: '"Cormorant Garamond", Georgia, "Times New Roman", serif' }}
-            >
-              Your Skin Journey
-            </h1>
-            <p className="text-lg text-[#5a5f73] sm:text-xl">
-              A personalized voyage through your skincare ritual
-            </p>
+            <ProgressIndicator currentStep={3} totalSteps={4} />
           </motion.div>
 
-          {loading ? (
-            <GlassCard className="border border-white/70 bg-white/55 py-12 text-center backdrop-blur-xl">
-              <div className="mx-auto mb-4 h-14 w-14 animate-spin rounded-full border-4 border-[#c95785] border-t-transparent" />
-              <p className="text-[#5a5f73]">Loading your skin journey...</p>
-            </GlassCard>
-          ) : !analysis ? (
-            <GlassCard className="border border-white/70 bg-white/55 text-center backdrop-blur-xl">
-              <p className="mb-4 text-[#5a5f73]">
-                {errorMessage || "No analysis found. Please upload a photo first."}
+          {/* Main scanner interface */}
+          <div className="flex flex-col items-center gap-12">
+            {/* Header */}
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.6, delay: 0.1 }}
+              className="text-center space-y-3"
+            >
+              <h2 className="text-3xl md:text-4xl font-semibold text-gray-800 dark:text-white">
+                AI Skin Scanner
+              </h2>
+              <p className="text-gray-500 text-sm md:text-base max-w-xl mx-auto">
+                Upload up to {maxPhotos} clear photos for advanced AI analysis
               </p>
-              {!isAuthenticated ? (
-                <Button onClick={() => login("/routine")}>Log in</Button>
-              ) : (
-                <Button onClick={() => navigate("/upload")}>Go to Upload</Button>
-              )}
-            </GlassCard>
-          ) : (
-            <>
-              {/* Floating Stats Cards */}
+
+              <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-white/80 border border-[#ead9fb] shadow-[0_10px_24px_rgba(139,99,211,0.08)]">
+                <Crown className="w-4 h-4 text-[#8b63d3]" />
+                <span className="text-sm font-semibold">
+                  {maxPhotos} Image{maxPhotos > 1 ? 's' : ''} Limit
+                </span>
+              </div>
+            </motion.div>
+
+            {/* Scanner Core Section */}
+            <motion.div
+              initial={{ opacity: 0, scale: 0.9 }}
+              animate={{ opacity: 1, scale: 1 }}
+              transition={{ duration: 0.6, delay: 0.2 }}
+              className="relative w-full flex items-center justify-center"
+              style={{ height: 400 }}
+            >
+              {/* Counter above scanner */}
+              <motion.div
+                className="absolute -top-16 left-1/2 -translate-x-1/2 px-6 py-3 rounded-full border border-[#eddffb] bg-white/70 dark:bg-purple-900/20 backdrop-blur-xl shadow-lg"
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: 0.3 }}
+              >
+                <div className="flex items-center gap-3">
+                  <span className="text-sm text-gray-700 dark:text-gray-300 font-medium">
+                    <strong className="text-[#8b63d3]">{files.length}</strong> / {maxPhotos} photos
+                  </span>
+                  <div className="flex gap-1">
+                    {Array.from({ length: maxPhotos }).map((_, index) => (
+                      <div
+                        key={index}
+                        className={`w-2 h-2 rounded-full transition-all ${
+                          index < files.length
+                            ? "bg-[#8b63d3] scale-110"
+                            : "bg-gray-300 dark:bg-gray-600"
+                        }`}
+                      />
+                    ))}
+                  </div>
+                </div>
+              </motion.div>
+
+              {/* Scanner Core */}
+              <ScannerCore isScanning={uploading} />
+
+              {/* Action Buttons */}
+              <ScannerActions
+                onCamera={() => {
+                  if (isLimitReached) {
+                    toast.error(`Max ${maxPhotos} images reached`);
+                    return;
+                  }
+                  initSound();
+                  setShowCamera(true);
+                }}
+                onUpload={() => {
+                  if (!isLimitReached) {
+                    // Trigger hidden file input
+                    const fileInput = document.getElementById("file-input") as HTMLInputElement;
+                    fileInput?.click();
+                  }
+                }}
+                disabled={isLimitReached}
+              />
+            </motion.div>
+
+            {/* Photo Preview Grid */}
+            {files.length > 0 && (
               <motion.div
                 initial={{ opacity: 0, y: 20 }}
                 animate={{ opacity: 1, y: 0 }}
-                transition={{ duration: 0.8, delay: 0.2 }}
-                className="mb-20"
+                transition={{ duration: 0.5 }}
+                className="w-full"
               >
-                <div className="grid gap-5 md:grid-cols-4">
-                  {/* Skin Type */}
-                  <motion.div
-                    whileHover={{ y: -8, rotateZ: 2 }}
-                    className="rounded-2xl border border-white/80 bg-white/60 p-5 backdrop-blur-md shadow-[0_16px_36px_rgba(201,87,133,0.15)] transition-all"
-                  >
-                    <p className="text-xs uppercase tracking-wider text-[#5a5f73]">Skin Signature</p>
-                    <p className="mt-2 text-2xl font-semibold text-[#1c2235]">
-                      {normalizeForDisplay(analysis.skinType, 20, "Balanced")}
-                    </p>
-                    <motion.div
-                      className="mx-auto mt-4 flex h-10 w-10 items-center justify-center rounded-full bg-gradient-to-br from-[#f1a9c2]/30 to-[#ffd4bc]/30"
-                      animate={{ y: [0, -4, 0] }}
-                      transition={{ duration: 3, repeat: Infinity }}
-                    >
-                      <Fingerprint className="h-5 w-5 text-[#c95785]" />
-                    </motion.div>
-                  </motion.div>
-
-                  {/* Health Score */}
-                  <motion.div
-                    whileHover={{ y: -8, rotateZ: -2 }}
-                    className="rounded-2xl border border-white/80 bg-white/60 p-5 backdrop-blur-md shadow-[0_16px_36px_rgba(201,87,133,0.15)] transition-all"
-                  >
-                    <p className="text-xs uppercase tracking-wider text-[#5a5f73]">Health Index</p>
-                    <motion.div
-                      className="mx-auto mt-3 h-20 w-20 rounded-full p-1"
-                      animate={{ rotate: 360 }}
-                      transition={{ duration: 20, repeat: Infinity, ease: "linear" }}
-                      style={{
-                        background: `conic-gradient(#c95785 ${Math.max(0, Math.min(360, analysis.healthScore * 3.6))}deg, #f1d7e8 0deg)`,
-                      }}
-                    >
-                      <div className="flex h-full w-full items-center justify-center rounded-full bg-white text-lg font-bold text-[#1c2235]">
-                        {analysis.healthScore}
-                      </div>
-                    </motion.div>
-                  </motion.div>
-
-                  {/* Skin Age */}
-                  <motion.div
-                    whileHover={{ y: -8, rotateZ: 2 }}
-                    className="rounded-2xl border border-white/80 bg-white/60 p-5 backdrop-blur-md shadow-[0_16px_36px_rgba(201,87,133,0.15)] transition-all"
-                  >
-                    <p className="text-xs uppercase tracking-wider text-[#5a5f73]">Chrono-Age</p>
-                    <p className="mt-2 text-3xl font-bold text-[#1c2235]">{analysis.skinAge}</p>
-                    <motion.div
-                      className="mx-auto mt-4 flex h-10 w-10 items-center justify-center rounded-full bg-gradient-to-br from-[#f1a9c2]/30 to-[#ffd4bc]/30"
-                      animate={{ y: [0, -4, 0] }}
-                      transition={{ duration: 3.5, repeat: Infinity, delay: 0.2 }}
-                    >
-                      <Hourglass className="h-5 w-5 text-[#c95785]" />
-                    </motion.div>
-                  </motion.div>
-
-                  {/* Summary */}
-                  <motion.div
-                    whileHover={{ y: -8, rotateZ: -2 }}
-                    className="rounded-2xl border border-white/80 bg-white/60 p-5 backdrop-blur-md shadow-[0_16px_36px_rgba(201,87,133,0.15)] transition-all"
-                  >
-                    <p className="text-xs uppercase tracking-wider text-[#5a5f73]">Summary</p>
-                    <p className="mt-2 text-sm leading-relaxed text-[#5a5f73]">
-                      {normalizeForDisplay(analysis.summary, 100, "Your skin is progressing beautifully.")}
-                    </p>
-                  </motion.div>
-                </div>
-              </motion.div>
-
-              {/* Vertical Timeline */}
-              <div className="relative mb-20 py-12">
-                {/* Center Timeline Line */}
-                <div className="absolute left-1/2 top-0 h-full w-1 -translate-x-1/2 bg-gradient-to-b from-transparent via-[#c95785] to-transparent">
-                  {/* Glowing line effect */}
-                  <motion.div
-                    className="absolute inset-0 w-1 bg-gradient-to-b from-transparent via-[#c95785] to-transparent blur-md"
-                    animate={{ opacity: [0.3, 0.8, 0.3] }}
-                    transition={{ duration: 3, repeat: Infinity }}
-                  />
-                </div>
-
-                {/* Timeline Steps */}
-                <div className="space-y-0">
-                  {/* MORNING SECTION HEADER */}
-                  {morningRoutine.length > 0 && (
-                    <motion.div
-                      initial={{ opacity: 0, scale: 0.9 }}
-                      whileInView={{ opacity: 1, scale: 1 }}
-                      transition={{ duration: 0.6, delay: 0.3 }}
-                      onViewportEnter={() => setCurrentSection("morning")}
-                      className="relative mb-16 py-8"
-                    >
-                      <div className="absolute inset-0 bg-gradient-to-r from-transparent via-[#f1a9c2]/20 to-transparent" />
-                      <div className="relative z-10 flex items-center justify-center gap-4">
+                <p className="text-center text-sm font-semibold text-gray-700 dark:text-gray-300 mb-4">
+                  Selected Photos
+                </p>
+                <div className="flex justify-center">
+                  <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4 max-w-2xl">
+                    <AnimatePresence>
+                      {files.map((file, index) => (
                         <motion.div
-                          animate={{ rotate: 360, y: [0, -10, 0] }}
-                          transition={{ duration: 4, repeat: Infinity, ease: "easeInOut" }}
-                          className="h-12 w-12 rounded-full bg-gradient-to-br from-[#f1a9c2] to-[#ffd4bc] p-3 shadow-[0_8px_24px_rgba(241,169,194,0.4)]"
+                          key={`${file.name}-${index}`}
+                          initial={{ opacity: 0, scale: 0.7 }}
+                          animate={{ opacity: 1, scale: 1 }}
+                          exit={{ opacity: 0, scale: 0.7 }}
+                          className="relative group"
                         >
-                          <Sun className="h-full w-full text-white" />
-                        </motion.div>
-                        <div>
-                          <h2
-                            className="text-3xl font-semibold text-[#1c2235]"
-                            style={{ fontFamily: '"Cormorant Garamond", Georgia, "Times New Roman", serif' }}
-                          >
-                            Morning Ritual
-                          </h2>
-                          <p className="text-sm text-[#5a5f73]">Start your day with intention</p>
-                        </div>
-                      </div>
-                    </motion.div>
-                  )}
-
-                  {/* Morning Steps */}
-                  {morningRoutine.map((item, index) => {
-                    const Icon = getStepIcon(item.step);
-                    const isLeft = index % 2 === 0;
-                    const glowColor =
-                      item.priority === "high"
-                        ? "#c95785"
-                        : item.priority === "medium"
-                          ? "#b55f82"
-                          : "#d49cb8";
-
-                    return (
-                      <TimelineStep
-                        key={`morning-${index}`}
-                        item={item}
-                        Icon={Icon}
-                        index={index}
-                        isLeft={isLeft}
-                        glowColor={glowColor}
-                        onActive={() => {
-                          setActiveStep(`morning-${index}`);
-                          setCurrentSection("morning");
-                        }}
-                      />
-                    );
-                  })}
-
-                  {/* NIGHT SECTION HEADER */}
-                  {nightRoutine.length > 0 && (
-                    <motion.div
-                      initial={{ opacity: 0, scale: 0.9 }}
-                      whileInView={{ opacity: 1, scale: 1 }}
-                      transition={{ duration: 0.6, delay: 0.5 }}
-                      onViewportEnter={() => setCurrentSection("evening")}
-                      className="relative my-16 py-8"
-                    >
-                      <div className="absolute inset-0 bg-gradient-to-r from-transparent via-[#c95785]/20 to-transparent" />
-                      <div className="relative z-10 flex items-center justify-center gap-4">
-                        <motion.div
-                          animate={{ rotate: -360, y: [0, -10, 0] }}
-                          transition={{ duration: 5, repeat: Infinity, ease: "easeInOut" }}
-                          className="h-12 w-12 rounded-full bg-gradient-to-br from-[#c95785] to-[#b55f82] p-3 shadow-[0_8px_24px_rgba(201,87,133,0.4)]"
-                        >
-                          <Moon className="h-full w-full text-white" />
-                        </motion.div>
-                        <div>
-                          <h2
-                            className="text-3xl font-semibold text-[#1c2235]"
-                            style={{ fontFamily: '"Cormorant Garamond", Georgia, "Times New Roman", serif' }}
-                          >
-                            Evening Retreat
-                          </h2>
-                          <p className="text-sm text-[#5a5f73]">Repair and rejuvenate while you rest</p>
-                        </div>
-                      </div>
-                    </motion.div>
-                  )}
-
-                  {/* Night Steps */}
-                  {nightRoutine.map((item, index) => {
-                    const Icon = getStepIcon(item.step);
-                    const isLeft = (morningRoutine.length + index) % 2 === 0;
-                    const glowColor =
-                      item.priority === "high"
-                        ? "#c95785"
-                        : item.priority === "medium"
-                          ? "#b55f82"
-                          : "#d49cb8";
-
-                    return (
-                      <TimelineStep
-                        key={`night-${index}`}
-                        item={item}
-                        Icon={Icon}
-                        index={morningRoutine.length + index}
-                        isLeft={isLeft}
-                        glowColor={glowColor}
-                        onActive={() => {
-                          setActiveStep(`night-${index}`);
-                          setCurrentSection("evening");
-                        }}
-                      />
-                    );
-                  })}
-                </div>
-              </div>
-
-              {/* Skin Concerns - Floating Bubbles */}
-              {analysis.concerns?.length > 0 && (
-                <motion.div
-                  initial={{ opacity: 0, y: 40 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  transition={{ duration: 0.8, delay: 0.7 }}
-                  className="mb-20"
-                >
-                  <h3
-                    className="mb-8 text-center text-4xl font-semibold text-[#1c2235]"
-                    style={{ fontFamily: '"Cormorant Garamond", Georgia, "Times New Roman", serif' }}
-                  >
-                    Your Skin Concerns
-                  </h3>
-                  <div className="grid gap-6 md:grid-cols-3">
-                    {analysis.concerns.map((concern, index) => (
-                      <motion.div
-                        key={`${concern.label}-${index}`}
-                        initial={{ opacity: 0, scale: 0.6, y: 30 }}
-                        animate={{ opacity: 1, scale: 1, y: 0 }}
-                        transition={{ duration: 0.6, delay: 0.8 + index * 0.1 }}
-                        whileHover={{ scale: 1.08, y: -10 }}
-                        className="relative"
-                      >
-                        <motion.div
-                          className="absolute inset-0 rounded-full opacity-0 group-hover:opacity-100"
-                          animate={{ y: [0, -8, 0] }}
-                          transition={{ duration: 4, repeat: Infinity }}
-                        />
-                        <div
-                          className={`relative rounded-3xl border border-white/70 bg-white/65 p-8 text-center backdrop-blur-md shadow-[0_16px_40px_rgba(201,87,133,0.12)] transition-all ${getConcernTone(concern.severity)}`}
-                          style={{
-                            borderColor: `${getConcernTone(concern.severity).includes("bg-[#a16c8f]") ? "#d9c5e0" : getConcernTone(concern.severity).includes("bg-[#3a857f]") ? "#b8ddd9" : "#e6d8cc"}`,
-                          }}
-                        >
-                          {/* Glow effect */}
                           <motion.div
-                            className="absolute -inset-1 rounded-3xl opacity-20 blur-xl"
-                            animate={{ opacity: [0.1, 0.3, 0.1] }}
-                            transition={{ duration: 3, repeat: Infinity }}
-                            style={{
-                              background: `radial-gradient(circle, ${getConcernTone(concern.severity).includes("bg-[#a16c8f]") ? "#a16c8f" : getConcernTone(concern.severity).includes("bg-[#3a857f]") ? "#3a857f" : "#d2bfac"}, transparent)`,
-                            }}
-                          />
+                            className="aspect-square rounded-2xl overflow-hidden border border-[#eddffb] bg-white/40 backdrop-blur-sm"
+                            whileHover={{ scale: 1.08 }}
+                          >
+                            <img
+                              src={previewUrls[index]}
+                              className="w-full h-full object-cover"
+                            />
+                            <div className="absolute inset-0 bg-gradient-to-br from-white/20 to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
+                          </motion.div>
 
-                          <div className="relative z-10">
-                            <div className="mb-4 flex justify-center">
-                              <span className={`inline-block rounded-full px-4 py-2 text-xs font-semibold uppercase tracking-wider ${getConcernTone(concern.severity)}`}>
-                                {concern.severity} severity
-                              </span>
-                            </div>
-
-                            <h4 className="mb-3 text-xl font-semibold text-[#1c2235]">
-                              {normalizeForDisplay(concern.label, 24, "Skin Concern")}
-                            </h4>
-
-                            <p className="mb-4 text-sm leading-relaxed text-[#5a5f73]">
-                              {normalizeForDisplay(concern.description, 90, "This concern can improve with consistent targeted care.")}
-                            </p>
-
-                            {(() => {
-                              const ConcernIcon = getConcernIcon(concern.label);
-                              return (
-                                <motion.div
-                                  animate={{ rotate: [0, 5, -5, 0], y: [0, -3, 0] }}
-                                  transition={{ duration: 4, repeat: Infinity }}
-                                  className="flex justify-center"
-                                >
-                                  <div className="flex h-12 w-12 items-center justify-center rounded-full bg-white/40 text-[#c95785]">
-                                    <ConcernIcon className="h-6 w-6" />
-                                  </div>
-                                </motion.div>
-                              );
-                            })()}
-                          </div>
-                        </div>
-                      </motion.div>
-                    ))}
+                          <button
+                            onClick={() => removeFile(index)}
+                            className="absolute -top-2 -right-2 w-7 h-7 bg-red-500 text-white rounded-full flex items-center justify-center opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity shadow-lg hover:bg-red-600"
+                            aria-label="Remove photo"
+                          >
+                            <X size={14} />
+                          </button>
+                        </motion.div>
+                      ))}
+                    </AnimatePresence>
                   </div>
-                </motion.div>
-              )}
-
-              {/* Pro Tips */}
-              <motion.div
-                initial={{ opacity: 0, y: 40 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ duration: 0.8, delay: 0.9 }}
-                className="mb-12"
-              >
-                <h3
-                  className="mb-8 text-center text-4xl font-semibold text-[#1c2235]"
-                  style={{ fontFamily: '"Cormorant Garamond", Georgia, "Times New Roman", serif' }}
-                >
-                  Expert Guidance
-                </h3>
-                <div className="grid gap-4 md:grid-cols-3">
-                  {[
-                    { icon: "🌊", title: "Layering", desc: "Apply from thinnest to thickest consistency" },
-                    { icon: "⏱️", title: "Patience", desc: "Wait 30-60 seconds between each product" },
-                    { icon: "💫", title: "Coverage", desc: "Don't forget neck and décolletage" },
-                  ].map((tip, index) => (
-                    <motion.div
-                      key={index}
-                      initial={{ opacity: 0, y: 20 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      transition={{ duration: 0.5, delay: 1 + index * 0.1 }}
-                      whileHover={{ y: -8, scale: 1.02 }}
-                      className="group rounded-2xl border border-white/70 bg-white/60 p-6 backdrop-blur-md shadow-[0_12px_32px_rgba(201,87,133,0.1)] transition-all"
-                    >
-                      <motion.div
-                        className="mb-4 text-4xl"
-                        animate={{ y: [0, -8, 0] }}
-                        transition={{ duration: 3, repeat: Infinity, delay: index * 0.3 }}
-                      >
-                        {tip.icon}
-                      </motion.div>
-                      <h4 className="mb-2 font-semibold text-[#1c2235]">{tip.title}</h4>
-                      <p className="text-sm text-[#5a5f73]">{tip.desc}</p>
-                    </motion.div>
-                  ))}
                 </div>
               </motion.div>
+            )}
 
-              {/* CTA Button */}
+            {/* Analyze Button */}
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.6, delay: 0.3 }}
+              className="w-full max-w-md"
+            >
               <motion.div
-                initial={{ opacity: 0, y: 30 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ duration: 0.8, delay: 1.1 }}
-                className="flex justify-center"
+                whileHover={!uploading ? { scale: 1.02 } : {}}
+                whileTap={!uploading ? { scale: 0.98 } : {}}
               >
                 <Button
                   glow
-                  className="h-14 min-w-[300px] rounded-full border border-white/30 bg-gradient-to-r from-[#c95785] to-[#b55f82] text-lg font-semibold text-white shadow-[0_16px_40px_rgba(201,87,133,0.4)] hover:shadow-[0_20px_50px_rgba(201,87,133,0.5)]"
-                  onClick={() => navigate("/products")}
+                  className="w-full h-14 text-lg font-semibold bg-gradient-to-r from-[#8b63d3] via-[#c95785] to-[#e8a1c0] hover:from-[#7a5325] hover:via-[#b83f6f] hover:to-[#d68fb0]"
+                  onClick={handleAnalyze}
+                  disabled={uploading || files.length === 0}
                 >
-                  ✨ Explore Your Skincare Collection
+                  {uploading ? (
+                    <motion.div
+                      animate={{ rotate: 360 }}
+                      transition={{ duration: 1, repeat: Infinity, ease: "linear" }}
+                      className="inline-block mr-2"
+                    >
+                      ◆
+                    </motion.div>
+                  ) : (
+                    "↗"
+                  )}
+                  {uploading ? "Analyzing Your Skin..." : "Analyze My Skin"}
                 </Button>
               </motion.div>
+            </motion.div>
 
-              {/* AI Assistant */}
-              <AIAssistant
-                currentStep={activeStep}
-                routine={currentSection === "morning" ? morningRoutine : nightRoutine}
-                section={currentSection}
-              />
-            </>
-          )}
+            {/* Tips Card */}
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.6, delay: 0.4 }}
+              className="w-full"
+            >
+              <GlassCard className="bg-white/75 border border-[#eddffb] dark:bg-purple-900/20 p-6 backdrop-blur-xl">
+                <div className="flex items-start gap-3">
+                  <Info className="w-5 h-5 text-[#8b63d3] mt-1 flex-shrink-0" />
+                  <div className="text-sm text-gray-700 dark:text-gray-300">
+                    <p className="mb-3 font-semibold">For best results, capture from multiple angles:</p>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                      <ul className="list-disc list-inside space-y-1 text-gray-600 dark:text-gray-400">
+                        <li>Front view (face forward)</li>
+                        <li>Left side profile</li>
+                        <li>Right side profile</li>
+                      </ul>
+                      <ul className="list-disc list-inside space-y-1 text-gray-600 dark:text-gray-400">
+                        <li>Use natural lighting</li>
+                        <li>Remove makeup if possible</li>
+                        <li>Ensure photos are clear and focused</li>
+                      </ul>
+                    </div>
+                  </div>
+                </div>
+              </GlassCard>
+            </motion.div>
+          </div>
+
+          {/* Hidden file input */}
+          <input
+            id="file-input"
+            type="file"
+            hidden
+            multiple
+            accept="image/*"
+            onChange={handleFileChange}
+          />
         </div>
+
+        {/* CAMERA MODAL - Enhanced UI */}
+        {showCamera && (
+          <motion.div
+            className="fixed inset-0 bg-black/80 backdrop-blur-xl flex items-center justify-center z-50 p-4"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.3 }}
+          >
+            <motion.div
+              className="relative w-[min(95vw,800px)]"
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              transition={{ duration: 0.3 }}
+            >
+              <Webcam
+                ref={webcamRef}
+                screenshotFormat="image/jpeg"
+                videoConstraints={{ facingMode: "user" }}
+                className="w-full rounded-3xl shadow-[0_20px_60px_rgba(0,0,0,0.6)]"
+              />
+
+              {/* 🎯 ENHANCED SCANNER OVAL GUIDE */}
+              <div className="absolute inset-0 flex items-center justify-center pointer-events-none rounded-3xl overflow-hidden">
+                <div className="relative h-80 w-64 sm:h-96 sm:w-72">
+                  {/* Main oval frame */}
+                  <motion.div
+                    className={`absolute inset-0 rounded-full border-2 transition-all duration-300 ${
+                      isCentered
+                        ? "border-emerald-300/90"
+                        : "border-white/50"
+                    }`}
+                    style={{
+                      boxShadow: isCentered
+                        ? "0 0 50px rgba(52,211,153,0.6), inset 0 0 40px rgba(52,211,153,0.3)"
+                        : "0 0 40px rgba(206,154,255,0.4), inset 0 0 30px rgba(245,183,220,0.25)",
+                    }}
+                    animate={{ scale: isCentered ? [1, 1.02, 1] : [1, 1.01, 1] }}
+                    transition={{ duration: 1.6, repeat: Infinity, ease: "easeInOut" }}
+                  />
+
+                  {/* Inner frame */}
+                  <motion.div
+                    className="absolute inset-1 rounded-full border border-[#eebee2]/80"
+                    style={{
+                      boxShadow: "0 0 30px rgba(195,140,255,0.35)",
+                    }}
+                    animate={{ opacity: [0.5, 0.9, 0.5] }}
+                    transition={{ duration: 2.8, repeat: Infinity, ease: "easeInOut" }}
+                  />
+
+                  {/* Scanning line */}
+                  <motion.div
+                    className="absolute left-1/2 top-2 h-1 w-40 -translate-x-1/2 rounded-full bg-gradient-to-r from-transparent via-white/80 to-transparent"
+                    animate={{ y: [0, 300, 0], opacity: [0.2, 0.9, 0.2] }}
+                    transition={{ duration: 3, repeat: Infinity, ease: "easeInOut" }}
+                  />
+
+                  {/* Corner markers */}
+                  {[
+                    "-left-2 top-8",
+                    "-left-2 bottom-8",
+                    "-right-2 top-8",
+                    "-right-2 bottom-8",
+                  ].map((position) => (
+                    <motion.span
+                      key={position}
+                      className={`absolute ${position} h-2 w-2 rounded-full bg-white/95 shadow-[0_0_16px_rgba(255,255,255,0.9)]`}
+                      animate={{ scale: [1, 1.3, 1], opacity: [0.6, 1, 0.6] }}
+                      transition={{ duration: 2, repeat: Infinity, ease: "easeInOut" }}
+                    />
+                  ))}
+                </div>
+              </div>
+
+              {/* Close button */}
+              <motion.button
+                onClick={() => setShowCamera(false)}
+                className="absolute top-4 right-4 w-11 h-11 rounded-full bg-black/50 hover:bg-black/70 text-white border border-white/30 flex items-center justify-center transition-all backdrop-blur-md"
+                whileHover={{ scale: 1.1 }}
+                whileTap={{ scale: 0.95 }}
+                aria-label="Close camera"
+              >
+                <X size={20} />
+              </motion.button>
+
+              {/* Action buttons */}
+              <motion.div
+                className="flex flex-col sm:flex-row gap-4 mt-6 justify-center"
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: 0.2 }}
+              >
+                <Button
+                  onClick={capturePhoto}
+                  className="sm:w-auto px-8 h-12 bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-600 hover:to-teal-600"
+                  glow
+                >
+                  📷 Capture Photo
+                </Button>
+                <Button
+                  onClick={() => setShowCamera(false)}
+                  variant="secondary"
+                  className="sm:w-auto px-8 h-12"
+                >
+                  Cancel
+                </Button>
+              </motion.div>
+            </motion.div>
+          </motion.div>
+        )}
+
       </div>
     </PageTransition>
   );
 }
+

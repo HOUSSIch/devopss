@@ -71,43 +71,21 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const syncUserToBackend = useCallback(async () => {
-    if (!keycloak.authenticated || !keycloak.token) return;
+    if (!keycloak.authenticated) return;
 
     try {
-      const response = await fetch(`${import.meta.env.VITE_API_URL}/users/sync-me`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${keycloak.token}`,
-        },
-      });
-
-      if (!response.ok) {
-        const text = await response.text();
-        throw new Error(text || "sync-me failed");
-      }
+      await http.post("/users/sync-me");
     } catch (e) {
       console.error("sync-me failed:", e);
     }
   }, []);
 
   const syncProfile = useCallback(async () => {
-    if (!keycloak.authenticated || !keycloak.token) return;
+    if (!keycloak.authenticated) return;
 
     try {
-      const response = await fetch(`${import.meta.env.VITE_API_URL}/users/me`, {
-        method: "GET",
-        headers: {
-          Authorization: `Bearer ${keycloak.token}`,
-        },
-      });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data?.message || "Failed to fetch user profile");
-      }
-
-      setSubscriptionTier((data?.subscriptionTier || "FREE") as SubscriptionTier);
+      const response = await http.get("/users/me");
+      setSubscriptionTier((response.data?.subscriptionTier || "FREE") as SubscriptionTier);
     } catch (e) {
       console.error("syncProfile failed:", e);
     }

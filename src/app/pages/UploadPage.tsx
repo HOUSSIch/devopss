@@ -12,8 +12,8 @@ import { ScannerActions } from "../components/ScannerActions";
 
 import { motion, AnimatePresence } from "motion/react";
 import { Upload, AlertCircle, X, Crown, Camera, Info } from "lucide-react";
-
 import { useAuth } from "../contexts/AuthContext";
+import { http } from "../api/http";
 import { usePhotoLimit } from "../../hooks/useFeatureAccess";
 import { toast } from "sonner";
 
@@ -627,3 +627,4 @@ export function UploadPage() {
     </PageTransition>
   );
 }
+
