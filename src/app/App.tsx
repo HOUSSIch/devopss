@@ -19,6 +19,7 @@ import { ScrollToTop } from "../app/components/ScrollToTop";
 import { ImmersiveAtmosphere } from "../app/components/ImmersiveAtmosphere";
 import AccessibilityDebugPanel from "../app/components/AccessibilityDebugPanel";
 import FocusAnnouncer from "../app/components/FocusAnnouncer";
+import ErrorBoundary from "../app/components/ErrorBoundary";
 import { recordAppLoadTime } from "../app/utils/performanceMetrics";
 import "@/styles/custom.css";
 
@@ -315,11 +316,13 @@ export default function App() {
                   <ScreenReaderRouteAnnouncer />
                   <Toaster position="top-right" richColors />
                   <Suspense fallback={<LoadingScreen />}>
-                    <div className="flex flex-col min-h-screen deepskyn-atmosphere premium-body deepskyn-future-app">
-                      <ImmersiveAtmosphere />
-                      {import.meta.env.DEV && <AccessibilityDebugPanel />}
-                      <AppRoutes />
-                    </div>
+                    <ErrorBoundary>
+                      <div className="flex flex-col min-h-screen deepskyn-atmosphere premium-body deepskyn-future-app">
+                        <ImmersiveAtmosphere />
+                        {import.meta.env.DEV && <AccessibilityDebugPanel />}
+                        <AppRoutes />
+                      </div>
+                    </ErrorBoundary>
                   </Suspense>
                 </BrowserRouter>
               </AnnouncementProvider>
