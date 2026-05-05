@@ -8,6 +8,7 @@ import React, {
   useRef,
 } from "react";
 import keycloak from "../contexts/keycloak";
+import { http } from "../api/http";
 
 type Role = "admin" | "user";
 type SubscriptionTier = "FREE" | "SILVER" | "GOLD" | "PLATINUM";

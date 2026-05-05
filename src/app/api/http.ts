@@ -2,14 +2,28 @@ import axios from "axios";
 import keycloak from "../contexts/keycloak";
 import { recordApiPerformanceMetric } from "../utils/performanceMetrics";
 
-const API_BASE = (import.meta.env.VITE_API_URL as string) || "http://localhost:3000";
+const API_BASE = import.meta.env.VITE_API_URL as string | undefined;
+
+if (!API_BASE) {
+  console.error(
+    "Missing VITE_API_URL. Set it to your backend URL before using API requests."
+  );
+}
 
 export const http = axios.create({
-  baseURL: API_BASE,
+  baseURL: API_BASE ?? "",
 });
 
 // Avant chaque requête: refresh + inject Bearer
 http.interceptors.request.use(async (config) => {
+  if (!API_BASE) {
+    return Promise.reject(
+      new Error(
+        "VITE_API_URL is missing. Configure the backend URL before making API requests."
+      )
+    );
+  }
+
   config.metadata = { startTime: performance.now() };
 
   if (keycloak.authenticated) {

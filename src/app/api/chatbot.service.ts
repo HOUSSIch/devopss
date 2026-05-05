@@ -1,32 +1,14 @@
-import axios from "axios";
+import { http } from "./http";
 
-const API_BASE = (import.meta.env.VITE_API_URL as string) || "http://localhost:3000";
-const API_URL = `${API_BASE}/chatbot`;
-
-let currentToken: string | null = null;
-
-export const setChatbotToken = (token: string | null) => {
-  currentToken = token;
+export const setChatbotToken = (_token: string | null) => {
+  // Kept for compatibility with existing callers; the shared http client
+  // now injects the active auth token automatically.
 };
 
 export const chatbotService = {
   async sendMessage(message: string, conversationId?: string) {
     try {
-      const token = currentToken;
-
-      if (!token) {
-        throw new Error("No authentication token available");
-      }
-
-      const response = await axios.post(
-        `${API_URL}/message`,
-        { message, conversationId },
-        {
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
-        }
-      );
+      const response = await http.post("/chatbot/message", { message, conversationId });
 
       return response.data;
     } catch (error: any) {
@@ -37,17 +19,7 @@ export const chatbotService = {
 
   async getConversations() {
     try {
-      const token = currentToken;
-
-      if (!token) {
-        throw new Error("No authentication token available");
-      }
-
-      const response = await axios.get(`${API_URL}/conversations`, {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      });
+      const response = await http.get("/chatbot/conversations");
 
       return response.data;
     } catch (error: any) {
@@ -58,20 +30,7 @@ export const chatbotService = {
 
   async getConversationById(id: string) {
     try {
-      const token = currentToken;
-
-      if (!token) {
-        throw new Error("No authentication token available");
-      }
-
-      const response = await axios.get(
-        `${API_URL}/conversation/${id}`,
-        {
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
-        }
-      );
+      const response = await http.get(`/chatbot/conversation/${id}`);
 
       return response.data;
     } catch (error: any) {

@@ -156,17 +156,9 @@ export function RemindersPage() {
     try {
       await refreshNow();
 
-      const API = (import.meta.env.VITE_API_URL as string) || "http://localhost:3000";
-      const res = await fetch(`${API}/ai/analyze`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${token}` },
-        body: formData,
-      });
+      const res = await http.post("/ai/analyze", formData);
 
-      const data = await res.json();
-      if (!res.ok) throw new Error(data?.message || "Error");
-
-      localStorage.setItem("skinAnalysisResult", JSON.stringify(data));
+      localStorage.setItem("skinAnalysisResult", JSON.stringify(res.data));
       navigate("/results");
     } catch (err: any) {
       toast.error(err.message);
