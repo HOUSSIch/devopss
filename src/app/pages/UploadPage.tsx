@@ -628,3 +628,5 @@ export function UploadPage() {
   );
 }
 
+
+export default UploadPage;

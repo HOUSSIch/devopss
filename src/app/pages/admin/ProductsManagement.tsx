@@ -19,7 +19,7 @@ import { toast } from "sonner";
 
 const cameraCrystal = new URL("../../../assets/hd_restoration_result_image.png", import.meta.url).href;
 
-export function UploadPage() {
+export function ProductsManagement() {
   const navigate = useNavigate();
   const { token, isAuthenticated, isInitialized, login, refreshNow } = useAuth();
   const { maxPhotos } = usePhotoLimit();
@@ -627,4 +627,4 @@ export function UploadPage() {
     </PageTransition>
   );
 }
-
+export default ProductsManagement;
