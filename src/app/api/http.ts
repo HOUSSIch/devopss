@@ -3,8 +3,10 @@ import keycloak from "../contexts/keycloak";
 import { recordApiPerformanceMetric } from "../utils/performanceMetrics";
 
 const API_BASE = import.meta.env.VITE_API_URL as string | undefined;
+const missingApiUrlFlag = "__deepskyn_missing_vite_api_url__";
 
-if (!API_BASE) {
+if (!API_BASE && !(globalThis as typeof globalThis & { [key: string]: boolean })[missingApiUrlFlag]) {
+  (globalThis as typeof globalThis & { [key: string]: boolean })[missingApiUrlFlag] = true;
   console.error(
     "Missing VITE_API_URL. Set it to your backend URL before using API requests."
   );
