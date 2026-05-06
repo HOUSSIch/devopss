@@ -125,6 +125,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         await withTimeout(
           keycloak.init({
             onLoad: "login-required",
+            tokenStorage: "localStorage",
             pkceMethod: "S256",
             checkLoginIframe: false,
             silentCheckSsoRedirectUri:
