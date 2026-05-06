@@ -124,7 +124,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
         await withTimeout(
           keycloak.init({
-            onLoad: "check-sso",
+            onLoad: "login-required",
             pkceMethod: "S256",
             checkLoginIframe: false,
             silentCheckSsoRedirectUri:
